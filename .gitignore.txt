@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+env/
+*.sqlite3
+
+# Poetry pipenv
+.poetry/
+Pipfile.lock
+poetry.lock
+
+# FastAPI / build artefacts
+dist/
+build/
+
+# Node or web
+node_modules/
+npm-debug.log*
+
+# Flutter and Dart
+**/build/
+**/.dart_tool/
+**/.packages
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.flutter-plugins-dependencies
+**/.idea
+**/.vscode
+**/*.flutter-plugins
+**/pubspec.lock
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/android/.gradle/
+**/android/local.properties
+**/android/app/debug
+**/android/app/profile
+**/android/app/release
+
+# IDE configs
+.vscode/
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db

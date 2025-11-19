@@ -1,0 +1,30 @@
+name: doc_assistant
+description: Doc Assistant Flutter client for FastAPI backend
+publish_to: "none"
+version: 0.2.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.6.0
+  file_picker: ^8.1.2
+  url_launcher: ^6.3.0
+  go_router: ^14.2.7
+  mime: ^2.0.0
+  flutter_secure_storage: ^9.2.2
+  shared_preferences: ^2.3.2
+  flutter_riverpod: ^2.5.1
+  uuid: ^4.5.1
+  http_parser: ^4.0.2
+  
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

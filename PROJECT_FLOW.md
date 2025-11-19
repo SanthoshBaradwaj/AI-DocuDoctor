@@ -1,0 +1,446 @@
+# AI-DocuDoctor Project Flow Documentation
+
+## Project Overview
+
+**AI-DocuDoctor** is a document management and AI chat application with:
+- **Backend**: FastAPI (Python) with PostgreSQL, MinIO (S3-compatible storage), Redis, and Celery
+- **Frontend**: Flutter mobile app (cross-platform: Android, iOS, Web, Windows, macOS, Linux)
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────┐
+│  Flutter App    │  (Mobile/Web Client)
+│  (doc_assistant)│
+└────────┬────────┘
+         │ HTTP/REST API
+         ▼
+┌─────────────────┐
+│  FastAPI Backend│  (doc_assistant_backend)
+│  Port: 8000     │
+└────────┬────────┘
+         │
+    ┌────┴────┬──────────┬──────────┐
+    ▼         ▼          ▼          ▼
+┌───────┐ ┌───────┐  ┌────────┐ ┌────────┐
+│PostgreSQL│ │ MinIO │  │ Redis  │ │ Celery │
+│(pgvector)│ │ S3    │  │        │ │ Worker │
+│ :5432    │ │ :9000 │  │ :6379  │ │        │
+└───────┘ └───────┘  └────────┘ └────────┘
+```
+
+---
+
+## Backend Flow (FastAPI)
+
+### 1. Application Entry Point
+**File**: `doc_assistant_backend/app/main.py`
+
+- **FastAPI app initialization** with CORS middleware
+- **Routers registered**:
+  - `/docs` → Documents router
+  - `/chat` → Chat router
+- **Health endpoint**: `GET /health`
+
+### 2. Database Layer
+**Files**: 
+- `app/db.py` - SQLAlchemy setup with PostgreSQL connection
+- `app/models.py` - Database models (User, Document)
+- `app/db_init.py` - Database initialization script
+
+**Models**:
+- **User**: id, email, password_hash, role
+- **Document**: id, owner_id, title, filename, s3_key, size, mime, status, excerpt, body, extracted (JSON)
+
+### 3. API Routers
+
+#### Documents Router (`app/routers/docs.py`)
+**Prefix**: `/docs`
+
+**Endpoints**:
+1. `GET /docs` - List all documents
+2. `GET /docs/{doc_id}` - Get document details
+3. `POST /docs/upload/presign` - Get presigned URL for upload
+4. `POST /docs/notify` - Notify backend after file upload
+   - Creates Document record
+   - Downloads file from MinIO
+   - Extracts text (currently only .txt files)
+   - Generates excerpt and extracted data
+   - Sets status to "ready"
+5. `POST /docs/analyze` - Analyze a single document
+6. `POST /docs/analyze/batch` - Analyze multiple documents
+7. `GET /docs/{doc_id}/download` - Get presigned download URL
+
+#### Chat Router (`app/routers/chat.py`)
+**Prefix**: `/chat`
+
+**Endpoints**:
+1. `POST /chat` - Send chat message
+   - Currently returns mock response
+   - Can optionally include docId for document context
+
+### 4. Services
+
+#### Storage Service (`app/services/storage.py`)
+- **`make_s3()`**: Creates boto3 S3 client configured for MinIO
+- **`presign_post()`**: Generates presigned POST URL for uploads
+- **`presign_get()`**: Generates presigned GET URL for downloads
+
+#### Extract Service (`app/services/extract.py`)
+- **`naive_extract_from_minio()`**: Extracts text from uploaded files
+  - Currently supports: `.txt` files (UTF-8 decoding)
+  - Other formats return placeholder text
+- **`build_extracted()`**: Builds extracted metadata (summary, entities)
+
+#### Text Utils (`app/services/text_utils.py`)
+- **`summarize()`**: Simple text truncation to character limit
+- **`fake_ner()`**: Mock named entity recognition (returns token count)
+
+### 5. Background Worker
+**File**: `app/worker.py`
+- Celery worker setup (currently minimal - just a ping task)
+- Configured to use Redis as broker/backend
+
+### 6. Docker Infrastructure
+**File**: `docker-compose.yml`
+
+**Services**:
+- **db**: PostgreSQL with pgvector extension
+- **redis**: Redis server for Celery
+- **minio**: S3-compatible object storage
+- **api**: FastAPI application
+- **worker**: Celery worker
+
+---
+
+## Frontend Flow (Flutter)
+
+### 1. Application Entry Point
+**File**: `lib/main.dart`
+- Initializes Flutter binding
+- Launches `DocAssistantApp`
+
+### 2. App Configuration
+**File**: `lib/app.dart`
+- MaterialApp with GoRouter configuration
+- Theme setup
+
+### 3. Routing
+**File**: `lib/routing/app_router.dart`
+
+**Routes**:
+- `/login` → LoginPage
+- `/signup` → SignupPage
+- `/forgot` → ForgotPage
+- `/home` → HomePage (main navigation hub)
+  - `/home/docs` → DocsPage (document list)
+  - `/home/docs/detail/:id` → DocDetailPage
+  - `/home/docs/analysis` → AnalysisPage
+  - `/home/docs/chat` → ChatPage
+  - `/home/upload` → UploadPage
+  - `/home/settings` → SettingsPage
+
+**Auth Guard**: Redirects unauthenticated users to `/login`
+
+### 4. Services Layer
+
+#### API Client (`lib/services/api_client.dart`)
+- **Dio HTTP client** with base URL configuration
+- **Auth interceptor**: Adds Bearer token to requests
+- **Methods**:
+  - `listDocs()` - GET /docs
+  - `getDocDetail(id)` - GET /docs/{id}
+  - `createPresign()` - POST /docs/upload/presign
+  - `notifyUploaded()` - POST /docs/notify
+  - `uploadViaProxy()` - POST /docs/upload/proxy (dev mode)
+  - `uploadToPresigned()` - Direct upload to MinIO
+  - `getDownloadUrl(id)` - GET /docs/{id}/download
+  - `analyzeOne(docId)` - POST /docs/analyze
+  - `chat()` - POST /chat
+
+#### Auth State (`lib/services/auth_state.dart`)
+- **ChangeNotifier** for auth state management
+- Used by GoRouter for route protection
+- Currently in-memory only (TODO: integrate with SecureStorage)
+
+#### Session (`lib/services/session.dart`)
+- **SharedPreferences** wrapper for:
+  - Login status
+  - Auth token storage
+
+#### Upload Service (`lib/services/upload_service.dart`)
+- Handles presigned uploads to MinIO
+- Hostname translation (minio → LAN IP for mobile devices)
+
+### 5. Feature Pages
+
+#### Home Page (`lib/features/home/home_page.dart`)
+- Navigation hub with tabs for:
+  - Documents
+  - Upload
+  - Analysis
+  - Chat
+  - Webhooks
+  - Settings
+
+#### Upload Page (`lib/features/upload/upload_page.dart`)
+**Flow**:
+1. User picks file using FilePicker
+2. **If proxy mode** (`kUseUploadProxy = true`):
+   - Uploads directly to API: `/docs/upload/proxy`
+   - API handles MinIO upload
+3. **If presigned mode**:
+   - Gets presigned URL from `/docs/upload/presign`
+   - Uploads file to MinIO using presigned URL
+   - Notifies backend via `/docs/notify`
+4. Shows upload progress
+5. Displays success/error message
+
+#### Docs Page (`lib/features/docs/docs_page.dart`)
+**Flow**:
+1. Fetches document list on init (`GET /docs`)
+2. Displays list with title, status, excerpt
+3. Pull-to-refresh support
+4. Tap document → Navigate to detail page
+
+#### Doc Detail Page (`lib/features/docs/doc_detail_page.dart`)
+**Flow**:
+1. Fetches document details (`GET /docs/{id}`)
+2. Displays: title, status, filename, MIME, size, excerpt, extracted data
+3. **Analyze button**: Calls `/docs/analyze` and refreshes
+4. **Chat button**: Navigates to chat page with docId
+
+#### Chat Page (`lib/features/chat/chat_page.dart`)
+**Flow**:
+1. Uses Riverpod `ChatController` for state management
+2. User types message → sends to `/chat` endpoint
+3. Displays conversation with user/assistant bubbles
+4. Can be document-scoped (with docId) or general
+
+#### Chat Controller (`lib/features/chat/chat_controller.dart`)
+- **Riverpod Notifier** managing chat messages
+- **Methods**:
+  - `send(text)` - Sends message to API, updates state
+  - `clear()` - Resets conversation
+- Supports both general chat and document-scoped chat
+
+### 6. Authentication Flow
+**Files**: `lib/features/auth/*.dart`
+
+**Current State**: Mock authentication
+- Login/Signup pages exist but don't call real API
+- `authState.setLoggedIn(true)` sets in-memory flag
+- TODO: Integrate with backend auth endpoints
+
+---
+
+## Complete User Flows
+
+### Flow 1: Document Upload
+```
+User → UploadPage
+  ↓
+Pick file (FilePicker)
+  ↓
+[Proxy Mode]
+  → POST /docs/upload/proxy (with file)
+    → API receives file
+    → API uploads to MinIO
+    → API creates Document record
+    → API extracts text
+    → Returns Document object
+  ↓
+[Presigned Mode]
+  → POST /docs/upload/presign
+    → Returns presigned URL + fields
+  → POST to MinIO (direct upload)
+  → POST /docs/notify
+    → API downloads from MinIO
+    → Creates Document record
+    → Extracts text
+    → Returns Document object
+  ↓
+Success message shown
+```
+
+### Flow 2: View Documents
+```
+User → DocsPage
+  ↓
+GET /docs (on init)
+  ↓
+Display list of documents
+  ↓
+User taps document
+  ↓
+Navigate to DocDetailPage
+  ↓
+GET /docs/{id}
+  ↓
+Display document details
+```
+
+### Flow 3: Analyze Document
+```
+User → DocDetailPage
+  ↓
+Tap "Analyze" button
+  ↓
+POST /docs/analyze {docId}
+  ↓
+Backend: build_extracted(doc.body)
+  → Generates summary
+  → Extracts entities (mock)
+  → Updates Document.extracted
+  ↓
+GET /docs/{id} (refresh)
+  ↓
+Display updated extracted data
+```
+
+### Flow 4: Chat with Document
+```
+User → ChatPage (with docId)
+  ↓
+Type message
+  ↓
+POST /chat
+  {
+    docId: 123,
+    messages: [...]
+  }
+  ↓
+Backend: Retrieves document.extracted
+  → Includes summary in response (mock)
+  ↓
+Display assistant reply
+```
+
+### Flow 5: Download Document
+```
+User → DocDetailPage
+  ↓
+Tap download button (if exists)
+  ↓
+GET /docs/{id}/download
+  ↓
+Returns presigned URL
+  ↓
+Open URL in browser/download
+```
+
+---
+
+## Configuration
+
+### Backend Configuration
+**Environment Variables** (`.env`):
+- `DATABASE_URL` - PostgreSQL connection string
+- `S3_ENDPOINT` - MinIO endpoint URL
+- `S3_BUCKET` - Storage bucket name
+- `S3_ACCESS_KEY` - MinIO access key
+- `S3_SECRET_KEY` - MinIO secret key
+- `S3_USE_SSL` - SSL flag
+- `REDIS_URL` - Redis connection string
+- `MAX_UPLOAD_MB` - Max file size (default: 25MB)
+
+### Frontend Configuration
+**File**: `lib/config.dart`
+- `kDevHost` - LAN IP address (e.g., '10.0.0.79')
+- `kApiBase` - API base URL (`http://$kDevHost:8000`)
+- `kStorageBase` - MinIO base URL (`http://$kDevHost:9000`)
+- `kUseUploadProxy` - Use proxy upload mode (default: true)
+
+---
+
+## Data Models
+
+### Backend Schemas (Pydantic)
+- `DocOut` - Document list item
+- `DocDetailOut` - Full document details
+- `PresignOut` - Presigned upload response
+- `NotifyIn` - Upload notification payload
+- `AnalyzeIn` - Analysis request
+- `BatchAnalyzeIn` - Batch analysis request
+- `ChatMessage` - Chat message structure
+- `ChatIn` - Chat request payload
+- `ChatOut` - Chat response
+
+### Frontend Models
+- `Doc` - Document model (`lib/models/doc.dart`)
+- `ChatMessage` - Chat message model (`lib/models/chat.dart`)
+
+---
+
+## Current Limitations / TODOs
+
+1. **Authentication**: Mock implementation, needs real backend integration
+2. **File Extraction**: Only `.txt` files are fully extracted; PDF/DOCX need implementation
+3. **Chat**: Returns mock responses; needs AI integration (LLM)
+4. **Analysis**: Simple text summarization; needs real NLP/AI
+5. **User Management**: Hardcoded `owner_id=1` in backend
+6. **Error Handling**: Basic error handling, needs improvement
+7. **Vector Search**: pgvector extension installed but not used yet
+
+---
+
+## Technology Stack
+
+### Backend
+- **FastAPI** 0.115.0 - Web framework
+- **SQLAlchemy** 2.0.36 - ORM
+- **PostgreSQL** with pgvector - Database
+- **MinIO** - S3-compatible storage
+- **Redis** - Message broker
+- **Celery** - Background tasks
+- **boto3** - AWS S3 client
+- **Pydantic** - Data validation
+
+### Frontend
+- **Flutter** - Cross-platform framework
+- **go_router** - Navigation/routing
+- **dio** - HTTP client
+- **flutter_riverpod** - State management
+- **file_picker** - File selection
+- **flutter_secure_storage** - Secure token storage
+- **shared_preferences** - Local storage
+
+---
+
+## Development Setup
+
+### Backend
+```bash
+cd doc_assistant_backend
+docker-compose up
+```
+
+### Frontend
+```bash
+cd doc_assistant
+flutter pub get
+flutter run
+```
+
+---
+
+## API Endpoints Summary
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| GET | `/docs` | List documents |
+| GET | `/docs/{id}` | Get document |
+| POST | `/docs/upload/presign` | Get presigned upload URL |
+| POST | `/docs/notify` | Notify upload complete |
+| POST | `/docs/analyze` | Analyze document |
+| POST | `/docs/analyze/batch` | Analyze multiple documents |
+| GET | `/docs/{id}/download` | Get download URL |
+| POST | `/chat` | Send chat message |
+
+---
+
+This document provides a comprehensive overview of the entire project flow. Each component is interconnected and follows the patterns described above.
+
