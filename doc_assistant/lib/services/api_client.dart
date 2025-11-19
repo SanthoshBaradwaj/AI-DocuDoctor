@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:dio/dio.dart';
-import 'package:http_parser/http_parser.dart'; // for MediaType.parse(...)
+import 'package:http_parser/http_parser.dart';
 import '../config.dart';
+import '../models/doc.dart';
+import '../models/chat.dart';
 import 'session.dart';
 
 class ApiClient {
@@ -10,7 +12,7 @@ class ApiClient {
 
   factory ApiClient() {
     final dio = Dio(BaseOptions(
-      baseUrl: kApiBase, // e.g. http://10.0.0.79:8000/api/v1
+      baseUrl: kApiBase, // Uses kApiBase getter (web vs mobile)
       connectTimeout: const Duration(seconds: 60),
       sendTimeout: const Duration(minutes: 5),
       receiveTimeout: const Duration(minutes: 5),
@@ -31,7 +33,7 @@ class ApiClient {
   Dio get dio => _dio;
 
   // -------- Docs --------
-  Future<List<dynamic>> listDocs({
+  Future<List<Doc>> fetchDocs({
     String? domain,
     String? docType,
     String? status,
@@ -42,87 +44,64 @@ class ApiClient {
     if (status != null) queryParams['status'] = status;
 
     final res = await _dio.get('/docs', queryParameters: queryParams);
-    if (res.data is List) return res.data as List;
+    if (res.data is List) {
+      return (res.data as List)
+          .map((item) => Doc.fromJson(item as Map<String, dynamic>))
+          .toList();
+    }
     if (res.data is Map && res.data['value'] is List) {
-      return (res.data['value'] as List);
+      return (res.data['value'] as List)
+          .map((item) => Doc.fromJson(item as Map<String, dynamic>))
+          .toList();
     }
     return [];
   }
 
-  Future<Map<String, dynamic>> getDocDetail(int id) async {
+  Future<DocDetail> fetchDocDetail(int id) async {
     final res = await _dio.get('/docs/$id');
-    return Map<String, dynamic>.from(res.data);
+    return DocDetail.fromJson(res.data as Map<String, dynamic>);
   }
 
   /// Initialize upload - get presigned URL
-  Future<Map<String, dynamic>> initUpload({
-    required String filename,
-    required String mimeType,
-    required int sizeBytes,
-    String? domain,
-    String? docType,
-  }) async {
+  Future<UploadInitOut> initUpload(UploadInitIn req) async {
     final res = await _dio.post('/docs/upload/presign', data: {
-      'filename': filename,
-      'mime_type': mimeType,
-      'size_bytes': sizeBytes,
-      if (domain != null) 'domain': domain,
-      if (docType != null) 'doc_type': docType,
+      'filename': req.filename,
+      'mime_type': req.mimeType,
+      'size_bytes': req.sizeBytes,
+      if (req.domain != null) 'domain': req.domain,
+      if (req.docType != null) 'doc_type': req.docType,
     });
-    return Map<String, dynamic>.from(res.data);
+    return UploadInitOut.fromJson(res.data as Map<String, dynamic>);
   }
 
   /// Notify backend that upload is complete
-  Future<Map<String, dynamic>> notifyUploaded({
-    required String storageKey,
-    required String filename,
-    required String mimeType,
-    required int sizeBytes,
-    String? domain,
-    String? docType,
-  }) async {
+  Future<DocDetail> notifyUploaded(UploadNotifyIn req) async {
     final res = await _dio.post('/docs/notify', data: {
-      'storage_key': storageKey,
-      'filename': filename,
-      'mime_type': mimeType,
-      'size_bytes': sizeBytes,
-      if (domain != null) 'domain': domain,
-      if (docType != null) 'doc_type': docType,
+      'storage_key': req.storageKey,
+      'filename': req.filename,
+      'mime_type': req.mimeType,
+      'size_bytes': req.sizeBytes,
+      if (req.domain != null) 'domain': req.domain,
+      if (req.docType != null) 'doc_type': req.docType,
     });
-    return Map<String, dynamic>.from(res.data);
+    return DocDetail.fromJson(res.data as Map<String, dynamic>);
   }
 
-  Future<Map<String, dynamic>> getDownloadUrl(int id) async {
-    final res = await _dio.get('/docs/$id/download');
-    return Map<String, dynamic>.from(res.data);
-  }
-
-  // Legacy analyze endpoint (transitional)
-  Future<Map<String, dynamic>> analyzeOne(int docId) async {
-    final res = await _dio.post('/docs/analyze', data: {'docId': docId});
-    return Map<String, dynamic>.from(res.data);
-  }
-
-  // -------- Chat --------
   /// Chat about a specific document
-  Future<Map<String, dynamic>> chatWithDocument({
-    required int docId,
-    required List<Map<String, dynamic>> messages,
-  }) async {
+  Future<ChatResponse> chatWithDocument(
+      int docId, List<ChatMessage> messages) async {
     final res = await _dio.post('/chat/document/$docId', data: {
-      'messages': messages,
+      'messages': messages.map((m) => m.toJson()).toList(),
     });
-    return Map<String, dynamic>.from(res.data);
+    return ChatResponse.fromJson(res.data as Map<String, dynamic>);
   }
 
   /// Global chat across all documents
-  Future<Map<String, dynamic>> chatGlobal({
-    required List<Map<String, dynamic>> messages,
-  }) async {
+  Future<ChatResponse> chatGlobal(List<ChatMessage> messages) async {
     final res = await _dio.post('/chat/global', data: {
-      'messages': messages,
+      'messages': messages.map((m) => m.toJson()).toList(),
     });
-    return Map<String, dynamic>.from(res.data);
+    return ChatResponse.fromJson(res.data as Map<String, dynamic>);
   }
 
   // ========= Uploads =========
@@ -138,10 +117,11 @@ class ApiClient {
   }) async {
     final uri = Uri.parse(url);
     String uploadUrl = url;
+    // For web, we need to handle MinIO URLs differently
     if (uri.host.toLowerCase() == 'minio' || uri.host == 'minio.local') {
       uploadUrl = Uri(
         scheme: uri.scheme,
-        host: kDevHost, // e.g. 10.0.0.79
+        host: 'localhost', // For web, use localhost
         port: uri.port,
         path: uri.path,
         query: uri.query,
@@ -175,30 +155,77 @@ class ApiClient {
     );
   }
 
-  // Legacy methods (kept for backward compatibility during transition)
-  @Deprecated('Use initUpload and notifyUploaded instead')
-  Future<Map<String, dynamic>> createPresign() async {
-    // This is a fallback - should use initUpload instead
-    final res = await _dio.post('/docs/upload/presign', data: {
-      'filename': 'unknown',
-      'mime_type': 'application/octet-stream',
-      'size_bytes': 0,
-    });
-    return Map<String, dynamic>.from(res.data);
+  // Legacy methods - deprecated
+  @Deprecated('Use fetchDocs instead')
+  Future<List<dynamic>> listDocs({
+    String? domain,
+    String? docType,
+    String? status,
+  }) async {
+    return fetchDocs(domain: domain, docType: docType, status: status)
+        .then((docs) => docs.map((d) => d.toJson()).toList());
   }
 
-  @Deprecated('Use notifyUploaded instead')
-  Future<Map<String, dynamic>> notifyUploadedLegacy({
-    required String key,
-    required String filename,
-    required int size,
-    String? mime,
-  }) async {
-    return notifyUploaded(
-      storageKey: key,
-      filename: filename,
-      mimeType: mime ?? 'application/octet-stream',
-      sizeBytes: size,
+  @Deprecated('Use fetchDocDetail instead')
+  Future<Map<String, dynamic>> getDocDetail(int id) async {
+    return fetchDocDetail(id).then((doc) => doc.toJson());
+  }
+}
+
+// Request/Response models for upload
+class UploadInitIn {
+  final String filename;
+  final String mimeType;
+  final int sizeBytes;
+  final String? domain;
+  final String? docType;
+
+  UploadInitIn({
+    required this.filename,
+    required this.mimeType,
+    required this.sizeBytes,
+    this.domain,
+    this.docType,
+  });
+}
+
+class UploadInitOut {
+  final String storageKey;
+  final String uploadUrl;
+  final Map<String, dynamic>? uploadFields;
+  final int maxSizeBytes;
+
+  UploadInitOut({
+    required this.storageKey,
+    required this.uploadUrl,
+    this.uploadFields,
+    required this.maxSizeBytes,
+  });
+
+  factory UploadInitOut.fromJson(Map<String, dynamic> json) {
+    return UploadInitOut(
+      storageKey: json['storage_key'] as String,
+      uploadUrl: json['upload_url'] as String,
+      uploadFields: json['upload_fields'] as Map<String, dynamic>?,
+      maxSizeBytes: json['max_size_bytes'] as int,
     );
   }
+}
+
+class UploadNotifyIn {
+  final String storageKey;
+  final String filename;
+  final String mimeType;
+  final int sizeBytes;
+  final String? domain;
+  final String? docType;
+
+  UploadNotifyIn({
+    required this.storageKey,
+    required this.filename,
+    required this.mimeType,
+    required this.sizeBytes,
+    this.domain,
+    this.docType,
+  });
 }

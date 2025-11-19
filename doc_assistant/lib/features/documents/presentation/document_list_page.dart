@@ -11,7 +11,8 @@ class DocumentListPage extends ConsumerWidget {
   const DocumentListPage({super.key});
 
   Future<void> _pickAndUpload(WidgetRef ref) async {
-    final result = await FilePicker.platform.pickFiles(allowMultiple: true, withData: false);
+    final result = await FilePicker.platform
+        .pickFiles(allowMultiple: true, withData: false);
     if (result == null) return;
     final files = result.paths.whereType<String>().map((p) => File(p)).toList();
     await ref.read(documentRepoProvider.notifier).addDocumentsFromFiles(files);
@@ -36,12 +37,15 @@ class DocumentListPage extends ConsumerWidget {
             ElevatedButton.icon(
               onPressed: selected.isEmpty
                   ? null
-                  : () => ref.read(documentRepoProvider.notifier).analyzeBatch(selected),
+                  : () => ref
+                      .read(documentRepoProvider.notifier)
+                      .analyzeBatch(selected),
               icon: const Icon(Icons.analytics),
               label: Text('Extract (${selected.length})'),
             ),
             TextButton(
-              onPressed: () => ref.read(selectedDocsProvider.notifier).state = <String>{},
+              onPressed: () =>
+                  ref.read(selectedDocsProvider.notifier).state = <String>{},
               child: const Text('Clear selection'),
             ),
           ]),
@@ -65,12 +69,13 @@ class DocumentListPage extends ConsumerWidget {
                     ),
                     title: Text(d.title),
                     subtitle: Text(
-                      d.excerpt + (d.extracted != null ? '  •  Extracted ✓' : ''),
+                      d.excerpt +
+                          (d.extracted != null ? '  •  Extracted ✓' : ''),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                     ),
                     trailing: const Icon(Icons.chevron_right),
-                    onTap: () => context.go('/home/docs/${d.id}'),
+                    onTap: () => context.go('/docs/${d.id}'),
                   ),
                 );
               },

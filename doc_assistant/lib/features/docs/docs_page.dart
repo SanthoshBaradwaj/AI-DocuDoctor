@@ -11,7 +11,7 @@ class DocsPage extends StatefulWidget {
 }
 
 class _DocsPageState extends State<DocsPage> {
-  late Future<List<dynamic>> _future;
+  late Future<List<Doc>> _future;
   String? _selectedDomain;
 
   static const _domains = [
@@ -29,8 +29,8 @@ class _DocsPageState extends State<DocsPage> {
     _future = _loadDocs();
   }
 
-  Future<List<dynamic>> _loadDocs() async {
-    return ApiClient().listDocs(domain: _selectedDomain);
+  Future<List<Doc>> _loadDocs() async {
+    return ApiClient().fetchDocs(domain: _selectedDomain);
   }
 
   Future<void> _refresh() async {
@@ -66,6 +66,19 @@ class _DocsPageState extends State<DocsPage> {
         .join(' ');
   }
 
+  Color _getStatusColor(String status) {
+    switch (status.toLowerCase()) {
+      case 'ready':
+        return Colors.green;
+      case 'processing':
+        return Colors.orange;
+      case 'error':
+        return Colors.red;
+      default:
+        return Colors.grey;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -79,7 +92,7 @@ class _DocsPageState extends State<DocsPage> {
           ),
           IconButton(
             icon: const Icon(Icons.upload_file),
-            onPressed: () => context.go('/home/upload'),
+            onPressed: () => context.go('/upload'),
             tooltip: 'Upload',
           ),
         ],
@@ -114,61 +127,80 @@ class _DocsPageState extends State<DocsPage> {
           const Divider(height: 1),
           // Documents list
           Expanded(
-            child: FutureBuilder<List<dynamic>>(
+            child: FutureBuilder<List<Doc>>(
               future: _future,
               builder: (context, snap) {
                 if (snap.connectionState == ConnectionState.waiting) {
                   return const Center(child: CircularProgressIndicator());
                 }
                 if (snap.hasError) {
-                  return Center(child: Text('Error: ${snap.error}'));
+                  return Center(
+                      child: Text('Error: ${snap.error}',
+                          style: const TextStyle(color: Colors.red)));
                 }
-                final items = snap.data ?? const [];
-                if (items.isEmpty) {
+                final docs = snap.data ?? [];
+                if (docs.isEmpty) {
                   return const Center(
                       child: Text('No documents yet. Tap the upload icon.'));
                 }
                 return RefreshIndicator(
                   onRefresh: _refresh,
                   child: ListView.separated(
-                    itemCount: items.length,
+                    itemCount: docs.length,
                     separatorBuilder: (_, __) => const Divider(height: 1),
                     itemBuilder: (context, i) {
-                      final docData = items[i] as Map<String, dynamic>;
-                      final doc = Doc.fromJson(docData);
-                      final id = doc.id;
-                      final title = doc.title;
-                      final status = doc.status;
-                      final domain = doc.domain;
-                      final docType = doc.docType;
-                      final excerpt = doc.excerpt;
-                      final expiryDate = doc.expiryDate;
-
+                      final doc = docs[i];
                       return ListTile(
-                        title: Text(title),
+                        title: Text(doc.title),
                         subtitle: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            if (domain != null || docType != null)
+                            if (doc.domain != null || doc.docType != null)
                               Text(
                                 [
-                                  if (domain != null) _formatDomain(domain),
-                                  if (docType != null) _formatDocType(docType),
+                                  if (doc.domain != null)
+                                    _formatDomain(doc.domain),
+                                  if (doc.docType != null)
+                                    _formatDocType(doc.docType),
                                 ].join(' • '),
                                 style: const TextStyle(
                                     fontWeight: FontWeight.w500, fontSize: 12),
                               ),
                             const SizedBox(height: 4),
-                            Text(
-                              '$status${expiryDate != null ? ' • Expires: ${expiryDate.toString().split(' ')[0]}' : ''}',
-                              style: const TextStyle(fontSize: 12),
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: _getStatusColor(doc.status)
+                                        .withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    doc.status.toUpperCase(),
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: _getStatusColor(doc.status),
+                                    ),
+                                  ),
+                                ),
+                                if (doc.expiryDate != null) ...[
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Expires: ${doc.expiryDate!.toString().split(' ')[0]}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ],
                             ),
-                            if (excerpt.isNotEmpty) ...[
+                            if (doc.excerpt.isNotEmpty) ...[
                               const SizedBox(height: 4),
                               Text(
-                                excerpt.length > 80
-                                    ? '${excerpt.substring(0, 80)}…'
-                                    : excerpt,
+                                doc.excerpt.length > 80
+                                    ? '${doc.excerpt.substring(0, 80)}…'
+                                    : doc.excerpt,
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontSize: 12),
@@ -177,7 +209,7 @@ class _DocsPageState extends State<DocsPage> {
                           ],
                         ),
                         trailing: const Icon(Icons.chevron_right),
-                        onTap: () => context.go('/home/docs/detail/$id'),
+                        onTap: () => context.go('/docs/${doc.id}'),
                       );
                     },
                   ),

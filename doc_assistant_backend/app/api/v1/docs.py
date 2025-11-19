@@ -160,7 +160,7 @@ def notify_uploaded(
             "document_id": doc.id,
             "domain": domain_value,
             "doc_type": doc_type_value,
-            "filename": payload.filename,
+            "file_name": payload.filename,
             "storage_key": payload.storage_key,
             "size_bytes": payload.size_bytes,
         }

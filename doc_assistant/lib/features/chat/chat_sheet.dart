@@ -27,12 +27,12 @@ class _ChatSheetState extends State<ChatSheet> {
     _scroll.animateTo(_scroll.position.maxScrollExtent + 80,
         duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
     try {
-      final response = await api.chatWithDocument(
-        docId: widget.docId,
-        messages: _msgs.map((m) => m.toJson()).toList(),
-      );
-      final reply = response['reply'] as String? ?? '';
-      setState(() => _msgs.add(ChatMessage('assistant', reply)));
+      // Convert to API ChatMessage format (role, content only)
+      final apiMessages =
+          _msgs.map((m) => ChatMessage(m.role, m.content)).toList();
+      final response = await api.chatWithDocument(widget.docId, apiMessages);
+      // Use the reply from ChatResponse
+      setState(() => _msgs.add(ChatMessage('assistant', response.reply)));
     } catch (e) {
       setState(() => _msgs.add(ChatMessage('assistant', 'Error: $e')));
     }

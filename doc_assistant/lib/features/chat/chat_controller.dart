@@ -3,6 +3,7 @@ import 'package:uuid/uuid.dart';
 import '../../services/api_client.dart';
 import 'package:dio/dio.dart';
 import 'chat_models.dart';
+import '../../models/chat.dart' as api_models;
 
 /// Global chat controller (no document context)
 final chatControllerProvider =
@@ -26,30 +27,21 @@ class ChatController extends Notifier<List<ChatMessage>> {
 
     final client = ApiClient();
     try {
-      final response = await client.chatGlobal(
-        messages:
-            state.map((m) => {'role': m.role, 'content': m.content}).toList(),
-      );
+      // Convert to api_models.ChatMessage for API call
+      final apiMessages = state
+          .map((m) => api_models.ChatMessage(m.role, m.content))
+          .toList();
 
-      // Handle new ChatResponseOut format
-      final reply = (response['reply'] ?? '').toString();
-      final messages = response['messages'] as List<dynamic>?;
+      final response = await client.chatGlobal(apiMessages);
 
-      if (messages != null) {
-        // Use the full conversation from backend
-        state = messages
-            .map((m) => ChatMessage(
-                  id: _uuid.v4(),
-                  role: m['role'] as String,
-                  content: m['content'] as String,
-                ))
-            .toList();
-      } else {
-        // Fallback: just add the reply
-        final botMsg =
-            ChatMessage(id: _uuid.v4(), role: 'assistant', content: reply);
-        state = [...state, botMsg];
-      }
+      // Update state with full conversation from backend
+      state = response.messages
+          .map((m) => ChatMessage(
+                id: _uuid.v4(),
+                role: m.role,
+                content: m.content,
+              ))
+          .toList();
     } on DioException catch (e) {
       state = [
         ...state,
@@ -99,31 +91,21 @@ class DocChatController extends FamilyNotifier<List<ChatMessage>, int> {
 
     final client = ApiClient();
     try {
-      final response = await client.chatWithDocument(
-        docId: docId,
-        messages:
-            state.map((m) => {'role': m.role, 'content': m.content}).toList(),
-      );
+      // Convert to api_models.ChatMessage for API call
+      final apiMessages = state
+          .map((m) => api_models.ChatMessage(m.role, m.content))
+          .toList();
 
-      // Handle new ChatResponseOut format
-      final reply = (response['reply'] ?? '').toString();
-      final messages = response['messages'] as List<dynamic>?;
+      final response = await client.chatWithDocument(docId, apiMessages);
 
-      if (messages != null) {
-        // Use the full conversation from backend
-        state = messages
-            .map((m) => ChatMessage(
-                  id: _uuid.v4(),
-                  role: m['role'] as String,
-                  content: m['content'] as String,
-                ))
-            .toList();
-      } else {
-        // Fallback: just add the reply
-        final botMsg =
-            ChatMessage(id: _uuid.v4(), role: 'assistant', content: reply);
-        state = [...state, botMsg];
-      }
+      // Update state with full conversation from backend
+      state = response.messages
+          .map((m) => ChatMessage(
+                id: _uuid.v4(),
+                role: m.role,
+                content: m.content,
+              ))
+          .toList();
     } on DioException catch (e) {
       state = [
         ...state,

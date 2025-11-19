@@ -13,10 +13,10 @@ class _HomePageState extends State<HomePage> {
   int idx = 0;
 
   static const _pages = [
-    ('Documents', Icons.description, '/home/docs'),
-    ('Upload', Icons.upload_file, '/home/upload'),
-    ('Chat', Icons.chat_bubble, '/home/chat'),
-    ('Settings', Icons.settings, '/home/settings'),
+    ('Documents', Icons.description, '/docs'),
+    ('Upload', Icons.upload_file, '/upload'),
+    ('Chat', Icons.chat_bubble, '/chat'),
+    ('Settings', Icons.settings, '/settings'),
   ];
 
   @override

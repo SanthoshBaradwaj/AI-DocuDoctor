@@ -12,40 +12,18 @@ class DocDetailPage extends StatefulWidget {
 }
 
 class _DocDetailPageState extends State<DocDetailPage> {
-  late Future<Map<String, dynamic>> _future;
-  bool _analyzing = false;
+  late Future<DocDetail> _future;
 
   @override
   void initState() {
     super.initState();
-    _future = ApiClient().getDocDetail(widget.docId);
+    _future = ApiClient().fetchDocDetail(widget.docId);
   }
 
   Future<void> _reload() async {
     setState(() {
-      _future = ApiClient().getDocDetail(widget.docId);
+      _future = ApiClient().fetchDocDetail(widget.docId);
     });
-  }
-
-  Future<void> _analyze() async {
-    setState(() => _analyzing = true);
-    try {
-      await ApiClient().analyzeOne(widget.docId);
-      await _reload();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Analysis updated')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Analyze failed: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _analyzing = false);
-    }
   }
 
   String _formatDomain(String? domain) {
@@ -81,77 +59,73 @@ class _DocDetailPageState extends State<DocDetailPage> {
           ),
         ],
       ),
-      body: FutureBuilder<Map<String, dynamic>>(
+      body: FutureBuilder<DocDetail>(
         future: _future,
         builder: (context, snap) {
           if (snap.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
           }
           if (snap.hasError) {
-            return Center(child: Text('Error: ${snap.error}'));
+            return Center(
+                child: Text('Error: ${snap.error}',
+                    style: const TextStyle(color: Colors.red)));
           }
-          final docData = snap.data!;
-          final doc = DocDetail.fromJson(docData);
-          final title = doc.title;
-          final status = doc.status;
-          final filename = doc.filename;
-          final mime = docData['mime'] ?? docData['mime_type'] ?? '';
-          final size = docData['size'] ?? docData['size_bytes'] ?? 0;
-          final excerpt = doc.excerpt;
-          final extracted = doc.extracted;
-          final domain = doc.domain;
-          final docType = doc.docType;
-          final expiryDate = doc.expiryDate;
+          final doc = snap.data!;
 
-          return Padding(
+          return SingleChildScrollView(
             padding: const EdgeInsets.all(16),
-            child: ListView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title,
+                Text(doc.title,
                     style: const TextStyle(
                         fontSize: 22, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                if (domain != null || docType != null) ...[
-                  Text('Domain: ${_formatDomain(domain)}'),
-                  Text('Type: ${_formatDocType(docType)}'),
+                if (doc.domain != null || doc.docType != null) ...[
+                  Text('Domain: ${_formatDomain(doc.domain)}'),
+                  Text('Type: ${_formatDocType(doc.docType)}'),
                   const SizedBox(height: 4),
                 ],
-                Text('Status: $status'),
-                Text('File: $filename'),
-                if (mime.isNotEmpty) Text('MIME: $mime'),
-                Text('Size: $size bytes'),
-                if (expiryDate != null)
-                  Text('Expiry: ${expiryDate.toString().split(' ')[0]}'),
+                Text('Status: ${doc.status}'),
+                Text('File: ${doc.filename}'),
+                if (doc.expiryDate != null)
+                  Text('Expiry: ${doc.expiryDate!.toString().split(' ')[0]}'),
                 const SizedBox(height: 12),
-                if (excerpt.isNotEmpty) ...[
+                if (doc.excerpt.isNotEmpty) ...[
                   const Text('Excerpt',
                       style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
-                  Text(excerpt),
+                  Text(doc.excerpt),
                   const SizedBox(height: 12),
                 ],
-                if (extracted != null && extracted.isNotEmpty) ...[
-                  const Text('Extracted',
+                if (doc.extracted != null && doc.extracted!.isNotEmpty) ...[
+                  const Text('Extracted Fields',
                       style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
-                  Text(extracted.toString()),
+                  ...doc.extracted!.entries.map((entry) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${entry.key}: ',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w500)),
+                            Expanded(
+                              child: Text(entry.value.toString()),
+                            ),
+                          ],
+                        ),
+                      )),
                   const SizedBox(height: 12),
                 ],
-                Row(
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _analyzing ? null : _analyze,
-                      icon: const Icon(Icons.insights),
-                      label: Text(_analyzing ? 'Analyzing…' : 'Analyze'),
-                    ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: () =>
-                          context.go('/home/chat?docId=${widget.docId}'),
-                      icon: const Icon(Icons.chat_bubble_outline),
-                      label: const Text('Chat'),
-                    ),
-                  ],
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => context.go('/chat?docId=${widget.docId}'),
+                    icon: const Icon(Icons.chat_bubble_outline),
+                    label: const Text('Chat About This Document'),
+                  ),
                 ),
               ],
             ),
