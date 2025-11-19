@@ -75,7 +75,7 @@ def get_presigned_upload(
             "request_id": request_id,
             "user_id": user_id,
             "storage_key": storage_key,
-            "filename": payload.filename,
+            "file_name": payload.filename,
             "mime_type": payload.mime_type,
             "size_bytes": payload.size_bytes,
             "max_size_bytes": max_size_bytes,
