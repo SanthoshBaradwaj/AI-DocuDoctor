@@ -1,0 +1,63 @@
+version: "3.9"
+
+# Override compose file for running with HTTP stub services
+# Usage: docker compose -f docker-compose.yml -f docker-compose.http-stubs.yml up
+
+services:
+  ocr-service:
+    build:
+      context: ../services/gateway_stubs/ocr_service
+      dockerfile: Dockerfile
+    environment:
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=docs
+      - MINIO_USE_SSL=false
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8081/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  llm-service:
+    build:
+      context: ../services/gateway_stubs/llm_service
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    environment:
+      - OCR_PROVIDER=http
+      - OCR_SERVICE_URL=http://ocr-service:8081
+      - LLM_PROVIDER=http
+      - LLM_SERVICE_URL=http://llm-service:8082
+    depends_on:
+      ocr-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+
+  worker:
+    environment:
+      - OCR_PROVIDER=http
+      - OCR_SERVICE_URL=http://ocr-service:8081
+      - LLM_PROVIDER=http
+      - LLM_SERVICE_URL=http://llm-service:8082
+    depends_on:
+      ocr-service:
+        condition: service_healthy
+      llm-service:
+        condition: service_healthy
+

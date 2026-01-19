@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
-from app.infrastructure.db.sql_alchemy import get_db
+from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
 from app.schemas import ChatRequestIn, ChatResponseOut, ChatMessageIn
 from app.infrastructure.ai.base import get_llm_service

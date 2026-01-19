@@ -1,6 +1,8 @@
 # Database infrastructure module
-from .sql_alchemy import Base, engine, get_db, create_extensions, SessionLocal
+# Note: Do not import sql_alchemy eagerly to avoid engine creation when using Firestore.
+# Import from sql_alchemy directly when needed, or use db_factory.get_db() for database sessions.
+
 from .models import User, Document
 
-__all__ = ["Base", "engine", "get_db", "create_extensions", "SessionLocal", "User", "Document"]
+__all__ = ["User", "Document"]
 

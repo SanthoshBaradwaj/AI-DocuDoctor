@@ -59,6 +59,10 @@ services:
       - QUEUE_BACKEND=celery
       - REDIS_URL=redis://redis:6379/0
       - AI_BACKEND=fake
+      - OCR_PROVIDER=fake
+      - OCR_SERVICE_URL=
+      - LLM_PROVIDER=fake
+      - LLM_SERVICE_URL=
     depends_on:
       db:
         condition: service_healthy
@@ -93,6 +97,10 @@ services:
       - QUEUE_BACKEND=celery
       - REDIS_URL=redis://redis:6379/0
       - AI_BACKEND=fake
+      - OCR_PROVIDER=fake
+      - OCR_SERVICE_URL=
+      - LLM_PROVIDER=fake
+      - LLM_SERVICE_URL=
     depends_on:
       db:
         condition: service_healthy

@@ -1,0 +1,1 @@
+Hello from Cloud Run + GCS + Firestore. Time: 2026-01-18T21:11:54.3126570-08:00

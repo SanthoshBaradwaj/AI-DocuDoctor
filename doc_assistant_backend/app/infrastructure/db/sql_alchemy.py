@@ -8,8 +8,23 @@ from app.domain.documents.doc_types import DocumentDomain, DocumentType
 
 settings = get_settings()
 
-engine = create_engine(str(settings.DATABASE_URL), echo=False, future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+# Guard engine creation: only create if DATABASE_URL is set and DB_PROVIDER is sql
+# This prevents crashes when DB_PROVIDER=firestore (where DATABASE_URL is None)
+_db_provider = getattr(settings, "DB_PROVIDER", None) or "sql"
+_has_database_url = bool(settings.DATABASE_URL)
+
+if _db_provider == "sql":
+    if not _has_database_url:
+        raise RuntimeError(
+            "DATABASE_URL is required when DB_PROVIDER=sql. "
+            "Set DATABASE_URL environment variable or use DB_PROVIDER=firestore."
+        )
+    engine = create_engine(str(settings.DATABASE_URL), echo=False, future=True)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+else:
+    # Firestore mode: engine and SessionLocal are not used
+    engine = None
+    SessionLocal = None
 
 class Base(DeclarativeBase):
     pass
@@ -22,6 +37,9 @@ def get_db():
         db.close()
 
 def create_extensions():
+    """Create database extensions (PostgreSQL only)."""
+    if engine is None:
+        raise RuntimeError("Cannot create extensions: SQL engine not initialized (DB_PROVIDER is not 'sql')")
     with engine.connect() as conn:
         try:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))

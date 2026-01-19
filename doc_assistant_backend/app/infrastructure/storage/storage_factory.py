@@ -3,6 +3,7 @@ from typing import Dict, Any
 from app.core.config import get_settings
 from app.infrastructure.storage.base import StorageBackend
 from app.infrastructure.storage.s3_minio import presign_post, presign_get, get_bucket_name
+from app.infrastructure.storage.gcs_backend import GCSStorageBackend
 
 settings = get_settings()
 
@@ -50,8 +51,12 @@ def get_storage_backend() -> StorageBackend:
     Returns:
         StorageBackend implementation
     """
-    if settings.STORAGE_BACKEND == "s3_minio":
+    storage_provider = getattr(settings, "STORAGE_PROVIDER", None) or settings.STORAGE_BACKEND
+    
+    if storage_provider == "gcs":
+        return GCSStorageBackend()
+    elif storage_provider == "s3_minio":
         return S3MinIOStorageBackend()
-    # GCS, S3 AWS will be added later
-    return S3MinIOStorageBackend()  # Default to MinIO for now
+    # Default to MinIO for backward compatibility
+    return S3MinIOStorageBackend()
 

@@ -13,4 +13,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY app ./app
 
-EXPOSE 8000
+EXPOSE 8080
+ENV PORT=8080
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+

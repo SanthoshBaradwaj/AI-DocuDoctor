@@ -4,14 +4,23 @@ from sqlalchemy import text
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.infrastructure.db.sql_alchemy import get_db, engine
+from app.infrastructure.db.db_factory import get_db
+
+settings = get_settings()
+
+# Lazy import engine only when needed (SQL mode)
+def _get_sql_engine():
+    """Get SQL engine if available (lazy import)."""
+    if settings.DB_PROVIDER == "firestore":
+        return None
+    from app.infrastructure.db.sql_alchemy import engine
+    return engine
 from app.infrastructure.storage.storage_factory import get_storage_backend
 from app.infrastructure.storage.s3_minio import make_s3, get_bucket_name
 import redis
 
 router = APIRouter(prefix="/api/v1/health", tags=["health"])
 logger = get_logger(__name__)
-settings = get_settings()
 
 
 @router.get("")
@@ -32,8 +41,14 @@ def health_deps(db: Session = Depends(get_db)):
     
     # Check database
     try:
-        db.execute(text("SELECT 1"))
-        deps_status["database"] = "up"
+        if settings.DB_PROVIDER == "firestore":
+            # For Firestore, just check if we can get a session
+            # The actual health check is implicit in get_db() working
+            deps_status["database"] = "up"
+        else:
+            # For SQL, execute a test query
+            db.execute(text("SELECT 1"))
+            deps_status["database"] = "up"
     except Exception as e:
         logger.error("Database health check failed", exc_info=True, extra={"error": str(e)})
         deps_status["database"] = "down"

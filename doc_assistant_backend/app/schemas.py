@@ -8,6 +8,8 @@ class DocOut(BaseModel):
     title: str
     filename: str
     status: str
+    ocr_status: str  # OCR lifecycle status: pending, processing, ready, error
+    llm_status: str  # LLM lifecycle status: pending, processing, ready, error
     excerpt: str
     extracted: Optional[dict] = None
     domain: Optional[str] = None  # DocumentDomain enum value as string

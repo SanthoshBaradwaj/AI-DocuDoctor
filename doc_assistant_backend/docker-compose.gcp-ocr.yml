@@ -1,0 +1,51 @@
+version: "3.9"
+
+# Override compose file for running with GCP OCR service locally
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gcp-ocr.yml up
+# 
+# Prerequisites:
+# - GCP credentials mounted at /gcp-credentials.json
+# - Environment variables set (GCS_BUCKET, etc.)
+
+services:
+  gcp-ocr-service:
+    build:
+      context: ../services/gateway_stubs/gcp_ocr_service
+      dockerfile: Dockerfile
+    environment:
+      - GCS_BUCKET=${GCS_BUCKET:-}
+      - GCS_OUTPUT_BUCKET=${GCS_OUTPUT_BUCKET:-${GCS_BUCKET}}
+      - GCS_OUTPUT_PREFIX=${GCS_OUTPUT_PREFIX:-ocr-output/}
+      - OCR_TIMEOUT_SECONDS=${OCR_TIMEOUT_SECONDS:-120}
+      - MAX_BYTES=${MAX_BYTES:-10485760}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PORT=8081
+      # Mount GCP credentials for ADC
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcp-credentials/credentials.json
+    volumes:
+      # Mount GCP credentials (adjust path as needed)
+      - ${GCP_CREDENTIALS_PATH:-./gcp-credentials.json}:/gcp-credentials/credentials.json:ro
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    environment:
+      - OCR_PROVIDER=http
+      - OCR_SERVICE_URL=http://gcp-ocr-service:8081
+    depends_on:
+      gcp-ocr-service:
+        condition: service_healthy
+
+  worker:
+    environment:
+      - OCR_PROVIDER=http
+      - OCR_SERVICE_URL=http://gcp-ocr-service:8081
+    depends_on:
+      gcp-ocr-service:
+        condition: service_healthy
+

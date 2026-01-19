@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import uuid
-from typing import Optional
+from typing import Optional, Literal
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
-from app.infrastructure.db.sql_alchemy import get_db
+from app.core.constants import PipelineStepStatus
+from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
 from app.schemas import (
     DocOut, DocDetailOut, UploadInitIn, UploadInitOut, UploadNotifyIn,
@@ -15,6 +16,9 @@ from app.schemas import (
 from app.infrastructure.storage.storage_factory import get_storage_backend
 from app.infrastructure.queue.celery_queue import get_task_queue
 from app.domain.documents.doc_types import DocumentDomain, DocumentType
+from app.services.status import set_ocr_status, set_llm_status
+from app.services.document_processor import process_document_ocr_sync, process_document_llm_sync
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/docs", tags=["docs"])
 logger = get_logger(__name__)
@@ -148,7 +152,11 @@ def notify_uploaded(
         status="processing",  # Will be updated by background task
         domain=domain_value,
         doc_type=doc_type_value,
+        request_id=request_id,  # Store request ID for traceability
     )
+    # Initialize status fields using helpers
+    set_ocr_status(doc, PipelineStepStatus.PENDING, reason="Document created")
+    set_llm_status(doc, PipelineStepStatus.PENDING, reason="Document created")
     db.add(doc)
     db.commit()
     db.refresh(doc)
@@ -170,16 +178,119 @@ def notify_uploaded(
     task_queue = get_task_queue()
     task_queue.enqueue_ocr(doc.id)
     
+    # Get task queue provider name for logging
+    task_queue_provider = getattr(settings, "TASK_QUEUE_PROVIDER", None) or settings.QUEUE_BACKEND or "celery"
+    
     logger.info(
         "OCR task enqueued via TaskQueue",
         extra={
             "request_id": request_id,
             "document_id": doc.id,
-            "queue_backend": settings.QUEUE_BACKEND or "celery",
+            "queue_backend": task_queue_provider,
         }
     )
     
     return doc
+
+
+class ProcessRequest(BaseModel):
+    """Request model for document processing endpoint."""
+    step: Optional[Literal["ocr", "llm", "all"]] = "all"  # Which step(s) to process
+
+
+@router.post("/{doc_id}/process", response_model=dict)
+def process_document(
+    doc_id: int,
+    payload: ProcessRequest,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Process a document (OCR and/or LLM analysis).
+    
+    This endpoint can be called synchronously or asynchronously (via HTTP task queue).
+    In cloud mode, /notify calls this endpoint via HTTP task queue.
+    
+    Args:
+        doc_id: Document ID to process
+        payload: Processing request with optional step specification
+        request: FastAPI request object
+        db: Database session
+        
+    Returns:
+        Dict with processing results
+    """
+    request_id = getattr(request.state, "request_id", None)
+    
+    # Get document
+    doc = db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+    
+    logger.info(
+        "Document processing requested",
+        extra={
+            "request_id": request_id,
+            "document_id": doc_id,
+            "step": payload.step,
+            "current_status": doc.status,
+            "ocr_status": doc.ocr_status,
+            "llm_status": doc.llm_status,
+        }
+    )
+    
+    results = {}
+    
+    try:
+        # Process OCR if requested
+        if payload.step in ["ocr", "all"]:
+            if doc.ocr_status != PipelineStepStatus.READY.value:
+                ocr_result = process_document_ocr_sync(doc, db)
+                results["ocr"] = ocr_result
+                # Refresh doc after OCR
+                db.refresh(doc)
+            else:
+                results["ocr"] = {"success": True, "message": "OCR already completed"}
+        
+        # Process LLM if requested
+        if payload.step in ["llm", "all"]:
+            if doc.llm_status != PipelineStepStatus.READY.value:
+                llm_result = process_document_llm_sync(doc, db)
+                results["llm"] = llm_result
+            else:
+                results["llm"] = {"success": True, "message": "LLM already completed"}
+        
+        logger.info(
+            "Document processing completed",
+            extra={
+                "request_id": request_id,
+                "document_id": doc_id,
+                "step": payload.step,
+                "results": results,
+            }
+        )
+        
+        return {
+            "success": True,
+            "document_id": doc_id,
+            "step": payload.step,
+            "results": results,
+        }
+    except Exception as e:
+        logger.error(
+            "Document processing failed",
+            extra={
+                "request_id": request_id,
+                "document_id": doc_id,
+                "step": payload.step,
+                "error": str(e),
+                "error_type": type(e).__name__,
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Processing failed: {str(e)}"
+        )
 
 
 @router.post("/analyze", response_model=DocDetailOut)
@@ -188,14 +299,31 @@ def analyze_one(payload: AnalyzeIn, db: Session = Depends(get_db)):
     
     TODO: This endpoint is transitional and will be superseded by the new async pipeline
     once OCR + LLM are fully wired. The /notify endpoint now handles async processing.
+    
+    This endpoint now uses the LlmService abstraction instead of direct extraction logic.
     """
     doc = db.get(Document, payload.docId)
     if not doc:
         raise HTTPException(404, "Not found")
     
-    # For now, keep the existing synchronous extraction logic
-    from app.services.extract import build_extracted
-    doc.extracted = build_extracted(doc.body)
+    # Use LlmService abstraction instead of direct extraction
+    from app.infrastructure.ai.base import get_llm_service
+    
+    if not doc.body:
+        raise HTTPException(400, "Document has no text content. OCR may not have completed yet.")
+    
+    llm_service = get_llm_service()
+    llm_result = llm_service.analyze_document(
+        text=doc.body,
+        mime_type=doc.mime,
+        doc_type=doc.doc_type,
+    )
+    
+    # Update document with LLM results (same fields as before)
+    doc.extracted = {
+        "summary": llm_result.summary,
+        "entities": llm_result.entities,
+    }
     db.add(doc)
     db.commit()
     db.refresh(doc)
@@ -207,19 +335,107 @@ def analyze_batch(payload: BatchAnalyzeIn, db: Session = Depends(get_db)):
     """Analyze multiple documents.
     
     TODO: This endpoint is transitional and will be superseded by the new async pipeline.
+    
+    This endpoint now uses the LlmService abstraction instead of direct extraction logic.
     """
     out = []
-    from app.services.extract import build_extracted
+    from app.infrastructure.ai.base import get_llm_service
+    
+    llm_service = get_llm_service()
     
     for did in payload.docIds:
         doc = db.get(Document, did)
         if not doc:
             continue
-        doc.extracted = build_extracted(doc.body)
+        
+        if not doc.body:
+            # Skip documents without text content
+            continue
+        
+        llm_result = llm_service.analyze_document(
+            text=doc.body,
+            mime_type=doc.mime,
+            doc_type=doc.doc_type,
+        )
+        
+        # Update document with LLM results (same fields as before)
+        doc.extracted = {
+            "summary": llm_result.summary,
+            "entities": llm_result.entities,
+        }
         db.add(doc)
         out.append(doc)
     db.commit()
     return out
+
+
+@router.post("/{doc_id}/reprocess/ocr")
+def reprocess_ocr(doc_id: int, db: Session = Depends(get_db)):
+    """Reprocess OCR for a document.
+    
+    Resets OCR and LLM statuses to pending and enqueues OCR task.
+    This will trigger a fresh OCR run, followed by LLM analysis.
+    """
+    doc = db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    
+    # Reset statuses for reprocessing using helpers
+    doc.status = "processing"
+    set_ocr_status(doc, PipelineStepStatus.PENDING, reason="OCR reprocessing requested")
+    set_llm_status(doc, PipelineStepStatus.PENDING, reason="OCR reprocessing requested (LLM will be recomputed)")
+    db.commit()
+    
+    # Enqueue OCR task
+    task_queue = get_task_queue()
+    task_queue.enqueue_ocr(doc.id)
+    
+    logger.info(
+        "OCR reprocessing scheduled",
+        extra={
+            "document_id": doc_id,
+            "queue_backend": settings.QUEUE_BACKEND or "celery",
+        }
+    )
+    
+    return {"message": "OCR reprocessing scheduled", "document_id": doc_id}
+
+
+@router.post("/{doc_id}/reprocess/llm")
+def reprocess_llm(doc_id: int, db: Session = Depends(get_db)):
+    """Reprocess LLM analysis for a document.
+    
+    Requires that OCR has already completed (document.body must be present).
+    Resets LLM status to pending and enqueues LLM task.
+    """
+    doc = db.get(Document, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    
+    # Verify OCR has completed
+    if not doc.body:
+        raise HTTPException(
+            400,
+            "OCR not completed; cannot reprocess LLM. Document has no text content."
+        )
+    
+    # Reset LLM status for reprocessing using helper
+    set_llm_status(doc, PipelineStepStatus.PENDING, reason="LLM reprocessing requested")
+    db.commit()
+    
+    # Enqueue LLM task
+    from app.infrastructure.queue.celery_queue import process_document_llm
+    process_document_llm.delay(doc.id)
+    
+    logger.info(
+        "LLM reprocessing scheduled",
+        extra={
+            "document_id": doc_id,
+            "queue_backend": settings.QUEUE_BACKEND or "celery",
+        }
+    )
+    
+    return {"message": "LLM reprocessing scheduled", "document_id": doc_id}
 
 
 @router.get("/{doc_id}/download")
