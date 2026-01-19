@@ -190,8 +190,9 @@ class FirestoreDocumentAdapter:
         """Commit pending operations (compatible with SQLAlchemy db.commit).
         
         Handles both new documents (via add()) and updates to existing documents.
+        Persists all modified fields by replacing the entire document (merge=False).
         """
-        if not hasattr(self, "_pending_docs"):
+        if not hasattr(self, "_pending_docs") or not self._pending_docs:
             return
         
         for op, doc in self._pending_docs:
@@ -201,20 +202,23 @@ class FirestoreDocumentAdapter:
                 # If doc has an ID, use it; otherwise Firestore will auto-generate
                 if hasattr(doc, "id") and doc.id:
                     doc_ref = self.db.collection(self.collection).document(str(doc.id))
-                    doc_ref.set(data)
-                    # Update doc.id with the Firestore document ID
-                    doc.id = doc_ref.id
+                    doc_ref.set(data, merge=False)  # Full overwrite
+                    # Ensure doc.id stays as string Firestore document id
+                    doc.id = str(doc_ref.id)
                 else:
                     # Auto-generate ID
                     doc_ref = self.db.collection(self.collection).document()
-                    doc_ref.set(data)
-                    doc.id = doc_ref.id
+                    doc_ref.set(data, merge=False)  # Full overwrite
+                    doc.id = str(doc_ref.id)
             elif op == "update":
                 # Update existing document
                 if not hasattr(doc, "id") or not doc.id:
                     raise ValueError("Cannot update document without ID")
                 doc_ref = self.db.collection(self.collection).document(str(doc.id))
-                doc_ref.set(data, merge=False)  # Use set() with merge=False to replace entire document
+                # Use set() with merge=False to replace entire document, ensuring all fields persisted
+                doc_ref.set(data, merge=False)
+                # Ensure doc.id stays as string Firestore document id
+                doc.id = str(doc_ref.id)
         
         # Clear pending operations
         self._pending_docs = []

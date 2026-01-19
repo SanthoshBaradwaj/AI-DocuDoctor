@@ -45,13 +45,24 @@ def get_document(db: Any, doc_id: Any) -> Optional[Document]:
 def is_firestore_adapter(db: Any) -> bool:
     """Check if db is a Firestore adapter.
     
+    Uses robust detection: class name contains "Firestore" OR has methods
+    that indicate Firestore adapter (e.g., _doc_to_dict, _dict_to_doc).
+    
     Args:
         db: Database session/adapter
         
     Returns:
         True if Firestore adapter, False if SQLAlchemy session
     """
-    return "Firestore" in db.__class__.__name__
+    # Check class name
+    if "Firestore" in db.__class__.__name__:
+        return True
+    
+    # Check for Firestore-specific methods
+    if hasattr(db, "_doc_to_dict") and hasattr(db, "_dict_to_doc"):
+        return True
+    
+    return False
 
 
 def update_document(db: Any, doc: Document) -> None:
@@ -63,13 +74,34 @@ def update_document(db: Any, doc: Document) -> None:
     Args:
         db: Database session/adapter
         doc: Document instance to update
+        
+    Raises:
+        ValueError: If Firestore adapter but document lacks ID
     """
     is_firestore = is_firestore_adapter(db)
     
     if is_firestore:
         # Firestore adapter: explicitly call update_document()
-        db.update_document(doc)
+        # Safe fallback: if method doesn't exist, log warning but don't raise
+        if hasattr(db, "update_document"):
+            try:
+                db.update_document(doc)
+            except (ValueError, AttributeError) as e:
+                logger.warning(
+                    "Failed to call update_document on Firestore adapter",
+                    extra={
+                        "error": str(e),
+                        "doc_id": getattr(doc, "id", None),
+                    }
+                )
+                # Re-raise ValueError (document lacks ID) but not AttributeError
+                if isinstance(e, ValueError):
+                    raise
+        else:
+            logger.warning(
+                "Firestore adapter lacks update_document method",
+                extra={"db_class": db.__class__.__name__}
+            )
     else:
         # SQLAlchemy: modifications are tracked automatically, no explicit call needed
-        # Just ensure the document is in the session (it should be if we got it via get())
         pass

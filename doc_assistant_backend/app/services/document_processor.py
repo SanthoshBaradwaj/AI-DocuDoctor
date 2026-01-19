@@ -219,6 +219,19 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
         # Update document with OCR results
         doc.body = ocr_result.text
         
+        # Ensure extracted["text"] is also set for consistency
+        extracted_data = doc.extracted or {}
+        extracted_data["text"] = ocr_result.text
+        extracted_data["ocr"] = {
+            "page_count": ocr_result.page_count,
+            "language": ocr_result.language,
+            "provider": provider,
+            "provider_name": provider_name,
+        }
+        # Clear any previous error
+        extracted_data.pop("ocr_error", None)
+        doc.extracted = extracted_data
+        
         # Generate excerpt (first 300 characters, safely handling empty text)
         if ocr_result.text:
             excerpt = ocr_result.text[:300].strip()
@@ -231,24 +244,24 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
         else:
             doc.excerpt = ""
         
-        # Store OCR metadata in extracted field with provider info
-        # Preserve existing extracted data if present
-        extracted_data = doc.extracted or {}
-        extracted_data["ocr"] = {
-            "page_count": ocr_result.page_count,
-            "language": ocr_result.language,
-            "provider": provider,
-            "provider_name": provider_name,
-        }
-        # Clear any previous error
-        extracted_data.pop("ocr_error", None)
-        doc.extracted = extracted_data
-        
         # Update status to ready
         doc.status = "ready"
         set_ocr_status(doc, PipelineStepStatus.READY, reason="OCR completed successfully")
         
         # Explicitly update document in Firestore (SQLAlchemy tracks changes automatically)
+        # Log backend type once per processing request
+        from app.infrastructure.db.db_helpers import is_firestore_adapter
+        if is_firestore_adapter(db):
+            logger.info(
+                "Updating document in Firestore",
+                extra={
+                    "event": "ocr.firestore_update",
+                    "request_id": request_id,
+                    "document_id": document_id,
+                    "body_length": len(doc.body),
+                    "ocr_status": doc.ocr_status,
+                }
+            )
         update_document(db, doc)
         db.commit()
     except Exception as e:
@@ -492,6 +505,7 @@ def process_document_llm_sync(doc: Document, db) -> dict:
             extracted_data["llm_error"] = error_msg
             doc.extracted = extracted_data
             set_llm_status(doc, PipelineStepStatus.ERROR, reason=error_msg)
+            update_document(db, doc)
             db.commit()
         except Exception as db_err:
             logger.error(
@@ -526,6 +540,9 @@ def process_document_llm_sync(doc: Document, db) -> dict:
         # Preserve top-level fields for backward compatibility
         extracted_data["summary"] = llm_result.summary
         extracted_data["entities"] = llm_result.entities
+        # Ensure text is preserved in extracted if body exists
+        if doc.body and "text" not in extracted_data:
+            extracted_data["text"] = doc.body
         # Clear any previous error
         extracted_data.pop("llm_error", None)
         doc.extracted = extracted_data
@@ -534,6 +551,17 @@ def process_document_llm_sync(doc: Document, db) -> dict:
         set_llm_status(doc, PipelineStepStatus.READY, reason="LLM analysis completed successfully")
         
         # Explicitly update document in Firestore (SQLAlchemy tracks changes automatically)
+        from app.infrastructure.db.db_helpers import is_firestore_adapter
+        if is_firestore_adapter(db):
+            logger.info(
+                "Updating document in Firestore",
+                extra={
+                    "event": "llm.firestore_update",
+                    "request_id": request_id,
+                    "document_id": document_id,
+                    "llm_status": doc.llm_status,
+                }
+            )
         update_document(db, doc)
         db.commit()
     except Exception as e:
