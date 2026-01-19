@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     GOOGLE_PROJECT_ID: Optional[str] = None
     GOOGLE_REGION: Optional[str] = None
     GCS_BUCKET: Optional[str] = None  # GCS bucket name
+    SIGNING_SA_EMAIL: Optional[str] = None  # Service account email for GCS signed URL generation (required on Cloud Run)
     
     # Cloud Run / HTTP task queue
     PUBLIC_BASE_URL: Optional[str] = None  # Base URL for constructing callback URLs (e.g., "https://api.example.com")

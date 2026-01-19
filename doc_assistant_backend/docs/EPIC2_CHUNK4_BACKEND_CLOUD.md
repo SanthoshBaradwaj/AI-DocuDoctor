@@ -28,6 +28,7 @@ All implementations are in `doc_assistant_backend/app/infrastructure/`:
 |----------|----------|---------|-------------|
 | `STORAGE_PROVIDER` | No | `minio` | Storage provider: `minio`, `gcs` |
 | `GCS_BUCKET` | Yes* | - | GCS bucket name (required if `STORAGE_PROVIDER=gcs`) |
+| `SIGNING_SA_EMAIL` | Yes* | - | Service account email for GCS signed URL generation (required on Cloud Run when `STORAGE_PROVIDER=gcs`) |
 | `DB_PROVIDER` | No | `sql` | Database provider: `sql`, `firestore` |
 | `GOOGLE_PROJECT_ID` | Yes* | - | GCP project ID (required if `DB_PROVIDER=firestore` or `STORAGE_PROVIDER=gcs`) |
 | `TASK_QUEUE_PROVIDER` | No | `celery` | Task queue: `celery`, `http`, `cloud_tasks` |
@@ -44,6 +45,7 @@ All implementations are in `doc_assistant_backend/app/infrastructure/`:
 ```bash
 STORAGE_PROVIDER=gcs
 GCS_BUCKET=docassis-documents
+SIGNING_SA_EMAIL=api-service@docassis-dev.iam.gserviceaccount.com
 DB_PROVIDER=firestore
 GOOGLE_PROJECT_ID=your-project-id
 TASK_QUEUE_PROVIDER=http
@@ -62,6 +64,42 @@ The `GCSStorageBackend` implements the `StorageBackend` protocol:
 - **Signed URL (V4)**: Generates V4 signed URLs for browser uploads
 - **Storage Key Format**: Supports both `gs://bucket/object` and `object/path` formats
 - **Application Default Credentials**: Uses Google ADC for authentication
+- **Impersonated Credentials for Signing**: Uses service account impersonation for signed URL generation on Cloud Run
+
+### Signed URL Generation on Cloud Run
+
+**Why Token-Only ADC Cannot Sign:**
+
+On Cloud Run, Application Default Credentials (ADC) are token-only credentials (compute engine credentials). These credentials:
+- Have access tokens for API calls
+- Do NOT have a private key
+- Cannot sign URLs because signing requires a private key to create cryptographic signatures
+
+**Why Impersonated Credentials Work:**
+
+The solution is to use **service account impersonation**:
+1. The Cloud Run service account (token-only) impersonates a service account that has a private key
+2. The impersonated credentials can sign URLs because they have access to the private key
+3. The signing service account (`SIGNING_SA_EMAIL`) must have:
+   - A private key (standard service account)
+   - IAM permission for the Cloud Run service account to impersonate it
+   - Storage permissions to generate signed URLs
+
+**Required Environment Variable:**
+
+- `SIGNING_SA_EMAIL`: Service account email that will be impersonated for signing
+  - Example: `api-service@docassis-dev.iam.gserviceaccount.com`
+  - Must grant the Cloud Run service account the `roles/iam.serviceAccountTokenCreator` role
+  - Must have storage permissions (`roles/storage.objectAdmin` or similar)
+
+**IAM Setup:**
+
+```bash
+# Grant Cloud Run service account permission to impersonate the signing service account
+gcloud iam service-accounts add-iam-policy-binding api-service@docassis-dev.iam.gserviceaccount.com \
+  --member="serviceAccount:YOUR_CLOUD_RUN_SA@PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/iam.serviceAccountTokenCreator"
+```
 
 ### Storage Key Handling
 
@@ -205,7 +243,7 @@ gcloud run deploy $SERVICE_NAME \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
-  --set-env-vars="STORAGE_PROVIDER=gcs,GCS_BUCKET=$GCS_BUCKET,DB_PROVIDER=firestore,GOOGLE_PROJECT_ID=$PROJECT_ID,TASK_QUEUE_PROVIDER=http,PUBLIC_BASE_URL=https://$SERVICE_NAME-xxxxx.run.app,OCR_PROVIDER=http,OCR_SERVICE_URL=https://gcp-ocr-service-xxxxx.run.app,LLM_PROVIDER=http,LLM_SERVICE_URL=https://gcp-llm-service-xxxxx.run.app" \
+  --set-env-vars="STORAGE_PROVIDER=gcs,GCS_BUCKET=$GCS_BUCKET,SIGNING_SA_EMAIL=api-service@$PROJECT_ID.iam.gserviceaccount.com,DB_PROVIDER=firestore,GOOGLE_PROJECT_ID=$PROJECT_ID,TASK_QUEUE_PROVIDER=http,PUBLIC_BASE_URL=https://$SERVICE_NAME-xxxxx.run.app,OCR_PROVIDER=http,OCR_SERVICE_URL=https://gcp-ocr-service-xxxxx.run.app,LLM_PROVIDER=http,LLM_SERVICE_URL=https://gcp-llm-service-xxxxx.run.app" \
   --memory=2Gi \
   --timeout=300 \
   --max-instances=10 \
