@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.logging import get_logger
 from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
+from app.infrastructure.db.db_helpers import get_document
 from app.schemas import ChatRequestIn, ChatResponseOut, ChatMessageIn
 from app.infrastructure.ai.base import get_llm_service
 
@@ -13,7 +14,7 @@ logger = get_logger(__name__)
 
 @router.post("/document/{doc_id}", response_model=ChatResponseOut)
 def chat_with_document(
-    doc_id: int,
+    doc_id: str,
     payload: ChatRequestIn,
     request: Request,
     db: Session = Depends(get_db),
@@ -34,7 +35,7 @@ def chat_with_document(
     )
     
     # Fetch document
-    doc = db.get(Document, doc_id)
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(404, "Document not found")
     

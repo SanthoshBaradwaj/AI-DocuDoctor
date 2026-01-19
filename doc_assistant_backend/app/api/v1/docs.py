@@ -9,6 +9,7 @@ from app.core.logging import get_logger
 from app.core.constants import PipelineStepStatus
 from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
+from app.infrastructure.db.db_helpers import get_document
 from app.schemas import (
     DocOut, DocDetailOut, UploadInitIn, UploadInitOut, UploadNotifyIn,
     AnalyzeIn, BatchAnalyzeIn  # Keep for backward compatibility
@@ -48,9 +49,21 @@ def list_docs(
 
 
 @router.get("/{doc_id}", response_model=DocDetailOut)
-def get_doc(doc_id: int, db: Session = Depends(get_db)):
+def get_doc(doc_id: str, db: Session = Depends(get_db)):
     """Get full details of a single document."""
-    doc = db.get(Document, doc_id)
+    # Self-check: Log database backend type for debugging
+    from app.infrastructure.db.db_helpers import is_firestore_adapter
+    is_firestore = is_firestore_adapter(db)
+    logger.debug(
+        "Get document request",
+        extra={
+            "doc_id": doc_id,
+            "db_backend": "firestore" if is_firestore else "sqlalchemy",
+            "db_class": db.__class__.__name__,
+        }
+    )
+    
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(404, "Not found")
     return doc
@@ -200,7 +213,7 @@ class ProcessRequest(BaseModel):
 
 @router.post("/{doc_id}/process", response_model=dict)
 def process_document(
-    doc_id: int,
+    doc_id: str,
     payload: ProcessRequest,
     request: Request,
     db: Session = Depends(get_db)
@@ -221,8 +234,21 @@ def process_document(
     """
     request_id = getattr(request.state, "request_id", None)
     
+    # Self-check: Log database backend type for debugging
+    from app.infrastructure.db.db_helpers import is_firestore_adapter
+    is_firestore = is_firestore_adapter(db)
+    logger.debug(
+        "Process document request",
+        extra={
+            "request_id": request_id,
+            "doc_id": doc_id,
+            "db_backend": "firestore" if is_firestore else "sqlalchemy",
+            "db_class": db.__class__.__name__,
+        }
+    )
+    
     # Get document
-    doc = db.get(Document, doc_id)
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
     
@@ -240,57 +266,64 @@ def process_document(
     
     results = {}
     
-    try:
-        # Process OCR if requested
-        if payload.step in ["ocr", "all"]:
-            if doc.ocr_status != PipelineStepStatus.READY.value:
-                ocr_result = process_document_ocr_sync(doc, db)
-                results["ocr"] = ocr_result
-                # Refresh doc after OCR
-                db.refresh(doc)
-            else:
-                results["ocr"] = {"success": True, "message": "OCR already completed"}
-        
-        # Process LLM if requested
-        if payload.step in ["llm", "all"]:
-            if doc.llm_status != PipelineStepStatus.READY.value:
-                llm_result = process_document_llm_sync(doc, db)
-                results["llm"] = llm_result
-            else:
-                results["llm"] = {"success": True, "message": "LLM already completed"}
-        
-        logger.info(
-            "Document processing completed",
-            extra={
-                "request_id": request_id,
-                "document_id": doc_id,
-                "step": payload.step,
-                "results": results,
-            }
-        )
-        
-        return {
-            "success": True,
+    # Process OCR if requested
+    if payload.step in ["ocr", "all"]:
+        if doc.ocr_status != PipelineStepStatus.READY.value:
+            ocr_result = process_document_ocr_sync(doc, db)
+            results["ocr"] = ocr_result
+            # Refresh doc after OCR
+            db.refresh(doc)
+        else:
+            results["ocr"] = {"success": True, "message": "OCR already completed"}
+    
+    # Process LLM if requested
+    if payload.step in ["llm", "all"]:
+        if doc.llm_status != PipelineStepStatus.READY.value:
+            llm_result = process_document_llm_sync(doc, db)
+            results["llm"] = llm_result
+            # Refresh doc after LLM
+            db.refresh(doc)
+        else:
+            results["llm"] = {"success": True, "message": "LLM already completed"}
+    
+    # Re-fetch document from DB to get latest persisted values
+    doc = get_document(db, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found after processing")
+    
+    # Determine overall success (all requested steps succeeded)
+    overall_success = all(
+        result.get("success", False) 
+        for result in results.values() 
+        if isinstance(result, dict)
+    )
+    
+    logger.info(
+        "Document processing completed",
+        extra={
+            "request_id": request_id,
             "document_id": doc_id,
             "step": payload.step,
+            "overall_success": overall_success,
             "results": results,
+            "final_status": doc.status,
+            "final_ocr_status": doc.ocr_status,
+            "final_llm_status": doc.llm_status,
+            "has_body": bool(doc.body),
+            "body_length": len(doc.body) if doc.body else 0,
         }
-    except Exception as e:
-        logger.error(
-            "Document processing failed",
-            extra={
-                "request_id": request_id,
-                "document_id": doc_id,
-                "step": payload.step,
-                "error": str(e),
-                "error_type": type(e).__name__,
-            },
-            exc_info=True
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Processing failed: {str(e)}"
-        )
+    )
+    
+    # Always return 200, even if some steps failed (errors are stored in DB)
+    return {
+        "success": overall_success,
+        "document_id": doc_id,
+        "step": payload.step,
+        "status": doc.status,
+        "ocr_status": doc.ocr_status,
+        "llm_status": doc.llm_status,
+        "results": results,
+    }
 
 
 @router.post("/analyze", response_model=DocDetailOut)
@@ -302,7 +335,7 @@ def analyze_one(payload: AnalyzeIn, db: Session = Depends(get_db)):
     
     This endpoint now uses the LlmService abstraction instead of direct extraction logic.
     """
-    doc = db.get(Document, payload.docId)
+    doc = get_document(db, payload.docId)
     if not doc:
         raise HTTPException(404, "Not found")
     
@@ -344,7 +377,7 @@ def analyze_batch(payload: BatchAnalyzeIn, db: Session = Depends(get_db)):
     llm_service = get_llm_service()
     
     for did in payload.docIds:
-        doc = db.get(Document, did)
+        doc = get_document(db, did)
         if not doc:
             continue
         
@@ -370,13 +403,13 @@ def analyze_batch(payload: BatchAnalyzeIn, db: Session = Depends(get_db)):
 
 
 @router.post("/{doc_id}/reprocess/ocr")
-def reprocess_ocr(doc_id: int, db: Session = Depends(get_db)):
+def reprocess_ocr(doc_id: str, db: Session = Depends(get_db)):
     """Reprocess OCR for a document.
     
     Resets OCR and LLM statuses to pending and enqueues OCR task.
     This will trigger a fresh OCR run, followed by LLM analysis.
     """
-    doc = db.get(Document, doc_id)
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(404, "Document not found")
     
@@ -402,13 +435,13 @@ def reprocess_ocr(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{doc_id}/reprocess/llm")
-def reprocess_llm(doc_id: int, db: Session = Depends(get_db)):
+def reprocess_llm(doc_id: str, db: Session = Depends(get_db)):
     """Reprocess LLM analysis for a document.
     
     Requires that OCR has already completed (document.body must be present).
     Resets LLM status to pending and enqueues LLM task.
     """
-    doc = db.get(Document, doc_id)
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(404, "Document not found")
     
@@ -439,12 +472,42 @@ def reprocess_llm(doc_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/download")
-def presigned_download(doc_id: int, db: Session = Depends(get_db)):
+def presigned_download(doc_id: str, db: Session = Depends(get_db)):
     """Return a short-lived URL to download the original file from storage."""
-    doc = db.get(Document, doc_id)
+    doc = get_document(db, doc_id)
     if not doc:
         raise HTTPException(404, "Not found")
     
     storage = get_storage_backend()
     url = storage.presign_download(doc.s3_key, expires_in=300)  # 5 minutes
     return {"url": url}
+
+
+@router.get("/{doc_id}/status", response_model=dict)
+def get_doc_status(doc_id: str, db: Session = Depends(get_db)):
+    """Get document processing status and last error (if any).
+    
+    Returns:
+        Dict with status, ocr_status, llm_status, and last_error fields
+    """
+    doc = get_document(db, doc_id)
+    if not doc:
+        raise HTTPException(404, "Document not found")
+    
+    # Extract error messages from extracted field
+    extracted = doc.extracted or {}
+    ocr_error = extracted.get("ocr_error")
+    llm_error = extracted.get("llm_error")
+    
+    # Determine last error (prefer OCR error if both exist, as OCR runs first)
+    last_error = ocr_error or llm_error
+    
+    return {
+        "document_id": doc_id,
+        "status": doc.status,
+        "ocr_status": doc.ocr_status,
+        "llm_status": doc.llm_status,
+        "last_error": last_error,
+        "ocr_error": ocr_error,
+        "llm_error": llm_error,
+    }

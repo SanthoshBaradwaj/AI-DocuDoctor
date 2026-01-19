@@ -4,7 +4,7 @@ from datetime import date
 
 # Document schemas
 class DocOut(BaseModel):
-    id: int
+    id: str  # Changed to str to support Firestore string IDs
     title: str
     filename: str
     status: str
@@ -59,10 +59,10 @@ class NotifyIn(BaseModel):
 
 # Analysis schemas (transitional - will be superseded by async pipeline)
 class AnalyzeIn(BaseModel):
-    docId: int
+    docId: str  # Changed to str to support Firestore string IDs
 
 class BatchAnalyzeIn(BaseModel):
-    docIds: List[int] = Field(default_factory=list)
+    docIds: List[str] = Field(default_factory=list)  # Changed to List[str] to support Firestore string IDs
 
 # Chat schemas
 class ChatMessageIn(BaseModel):
@@ -85,7 +85,7 @@ class ChatMessage(BaseModel):
     content: str
 
 class ChatIn(BaseModel):
-    docId: Optional[int] = None
+    docId: Optional[str] = None  # Changed to Optional[str] to support Firestore string IDs
     messages: List[ChatMessage]
 
 class ChatOut(BaseModel):

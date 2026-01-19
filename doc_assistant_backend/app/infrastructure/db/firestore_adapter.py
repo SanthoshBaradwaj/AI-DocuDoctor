@@ -1,6 +1,6 @@
 """Firestore database adapter for Document persistence."""
 from typing import Optional, List, Dict, Any
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP
 from google.cloud.firestore_v1.base_query import BaseQuery
@@ -10,6 +10,35 @@ from app.core.constants import PipelineStepStatus
 from app.infrastructure.db.models import Document
 
 settings = get_settings()
+
+
+def _coerce_datetime(value):
+    """Safely convert Firestore timestamp to datetime.datetime.
+    
+    Handles various Firestore timestamp types including DatetimeWithNanoseconds
+    which may or may not have a to_datetime() method.
+    
+    Args:
+        value: Firestore timestamp value (can be None, datetime, DatetimeWithNanoseconds, etc.)
+        
+    Returns:
+        datetime.datetime object (timezone-aware in UTC) or None if value is None
+    """
+    if value is None:
+        return None
+
+    # Firestore returns DatetimeWithNanoseconds which is often a datetime subclass
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    if hasattr(value, "to_datetime"):
+        dt = value.to_datetime()
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    if hasattr(value, "timestamp"):
+        return datetime.fromtimestamp(value.timestamp(), tz=timezone.utc)
+
+    return None
 
 
 class FirestoreDocumentAdapter:
@@ -55,22 +84,14 @@ class FirestoreDocumentAdapter:
     
     def _dict_to_doc(self, doc_id: str, data: Dict[str, Any]) -> Document:
         """Convert Firestore dict to SQLAlchemy-like Document model."""
-        # Convert Firestore timestamp to datetime
-        created_at = data.get("created_at")
-        if hasattr(created_at, "timestamp"):
-            created_at = created_at.to_datetime()
-        elif isinstance(created_at, datetime):
-            pass
-        else:
-            created_at = datetime.utcnow()
+        # Convert Firestore timestamp to datetime using safe helper
+        created_at = _coerce_datetime(data.get("created_at"))
+        if created_at is None:
+            created_at = datetime.now(timezone.utc)
         
-        updated_at = data.get("updated_at")
-        if hasattr(updated_at, "timestamp"):
-            updated_at = updated_at.to_datetime()
-        elif isinstance(updated_at, datetime):
-            pass
-        else:
-            updated_at = datetime.utcnow()
+        updated_at = _coerce_datetime(data.get("updated_at"))
+        if updated_at is None:
+            updated_at = datetime.now(timezone.utc)
         
         # Convert expiry_date string to date if present
         expiry_date = None
@@ -82,7 +103,9 @@ class FirestoreDocumentAdapter:
         
         # Create Document instance (mimicking SQLAlchemy model)
         doc = Document()
-        doc.id = int(doc_id) if doc_id.isdigit() else doc_id  # Try to convert to int for compatibility
+        # Keep ID as string for Firestore (Pydantic schema will handle serialization)
+        # Note: Document model has id: int for SQL compatibility, but Firestore uses string IDs
+        doc.id = doc_id  # Keep as string for Firestore compatibility
         doc.owner_id = data.get("owner_id", 1)
         doc.title = data.get("title", "")
         doc.filename = data.get("filename", "")
@@ -146,14 +169,35 @@ class FirestoreDocumentAdapter:
             self._pending_docs = []
         self._pending_docs.append(("add", doc))
     
+    def update_document(self, doc: Document) -> None:
+        """Update an existing document in Firestore.
+        
+        This method explicitly updates a document that already exists.
+        Call commit() to persist the changes.
+        
+        Args:
+            doc: Document instance with an existing ID
+        """
+        if not hasattr(doc, "id") or not doc.id:
+            raise ValueError("Document must have an ID to update")
+        
+        # Store document in instance for commit
+        if not hasattr(self, "_pending_docs"):
+            self._pending_docs = []
+        self._pending_docs.append(("update", doc))
+    
     def commit(self) -> None:
-        """Commit pending operations (compatible with SQLAlchemy db.commit)."""
+        """Commit pending operations (compatible with SQLAlchemy db.commit).
+        
+        Handles both new documents (via add()) and updates to existing documents.
+        """
         if not hasattr(self, "_pending_docs"):
             return
         
         for op, doc in self._pending_docs:
+            data = self._doc_to_dict(doc)
+            
             if op == "add":
-                data = self._doc_to_dict(doc)
                 # If doc has an ID, use it; otherwise Firestore will auto-generate
                 if hasattr(doc, "id") and doc.id:
                     doc_ref = self.db.collection(self.collection).document(str(doc.id))
@@ -165,6 +209,12 @@ class FirestoreDocumentAdapter:
                     doc_ref = self.db.collection(self.collection).document()
                     doc_ref.set(data)
                     doc.id = doc_ref.id
+            elif op == "update":
+                # Update existing document
+                if not hasattr(doc, "id") or not doc.id:
+                    raise ValueError("Cannot update document without ID")
+                doc_ref = self.db.collection(self.collection).document(str(doc.id))
+                doc_ref.set(data, merge=False)  # Use set() with merge=False to replace entire document
         
         # Clear pending operations
         self._pending_docs = []
