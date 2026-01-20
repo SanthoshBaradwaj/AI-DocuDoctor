@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     
     # Logging
     LOG_LEVEL: str = "INFO"
+    
+    # Chat/LLM limits
+    MAX_REPLY_CHARS: int = 50000  # Maximum reply length in characters
 
     class Config:
         env_file = ".env"

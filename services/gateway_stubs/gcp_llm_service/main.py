@@ -5,7 +5,7 @@ import time
 import logging
 import re
 import asyncio
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Header
@@ -26,9 +26,13 @@ app = FastAPI(title="GCP Gemini LLM Gateway Service")
 
 # Configuration from environment
 GCP_REGION = os.getenv("GCP_REGION", "us-central1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gemini-1.5-flash")
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.0-flash-lite-001")
 MAX_CHARS = int(os.getenv("MAX_CHARS", "50000"))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "15"))
+
+# Parse fallback models from comma-separated env var
+MODEL_FALLBACKS_STR = os.getenv("MODEL_FALLBACKS", "")
+MODEL_FALLBACKS = [m.strip() for m in MODEL_FALLBACKS_STR.split(",") if m.strip()] if MODEL_FALLBACKS_STR else []
 
 # Initialize Vertex AI (uses ADC)
 # Note: GenerativeModel can work without explicit init, but we set region explicitly
@@ -434,9 +438,373 @@ async def analyze_document(
         )
 
 
+class ChatMessage(BaseModel):
+    """Individual chat message."""
+    role: str  # "user", "assistant", or "system"
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """Request model for chat generation.
+    
+    Supports two formats:
+    1. New format: {messages: [{role, content}, ...]}
+    2. Legacy format: {prompt: str, context?: str} (for backward compatibility)
+    """
+    messages: Optional[List[ChatMessage]] = None
+    prompt: Optional[str] = None  # Legacy format
+    context: Optional[str] = None  # Legacy format
+
+
+class ChatResponse(BaseModel):
+    """Response model for chat generation."""
+    reply: str
+    model_used: str
+
+
+async def call_gemini_chat_async(prompt: str, context: Optional[str] = None) -> Tuple[str, str]:
+    """Call Vertex AI Gemini for chat generation with model fallback support.
+    
+    Args:
+        prompt: User's prompt/question
+        context: Optional context (e.g., document content)
+        
+    Returns:
+        Tuple of (response_text, model_used)
+        
+    Raises:
+        TimeoutError: If request times out
+        RuntimeError: If Vertex AI call fails after all fallbacks
+    """
+    # Build full prompt with context if provided
+    full_prompt = prompt
+    if context:
+        full_prompt = f"Context: {context}\n\nUser question: {prompt}"
+    
+    # Try primary model first, then fallbacks
+    models_to_try = [MODEL_NAME] + MODEL_FALLBACKS
+    
+    def _call_gemini_sync(model_name: str):
+        """Synchronous Gemini call for chat with specific model."""
+        # Initialize model
+        model = GenerativeModel(model_name)
+        
+        # Generate content
+        generation_config = {
+            "temperature": 0.7,
+            "max_output_tokens": 2048,
+        }
+        
+        logger.debug(
+            "Calling Vertex AI Gemini for chat",
+            extra={
+                "event": "gcp_llm.gemini.chat_call_started",
+                "model_name": model_name,
+                "prompt_length": len(prompt),
+                "context_length": len(context) if context else 0,
+            }
+        )
+        
+        # Call Gemini (synchronous)
+        response = model.generate_content(
+            full_prompt,
+            generation_config=generation_config,
+        )
+        
+        if not response or not response.text:
+            raise RuntimeError("Empty response from Gemini")
+        
+        return response.text.strip()
+    
+    start_time = time.time()
+    last_error = None
+    
+    for model_name in models_to_try:
+        try:
+            # Run in executor with timeout
+            loop = asyncio.get_event_loop()
+            response_text = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _call_gemini_sync(model_name)),
+                timeout=REQUEST_TIMEOUT_SECONDS
+            )
+            
+            duration_ms = (time.time() - start_time) * 1000
+            
+            logger.debug(
+                "Gemini chat response received",
+                extra={
+                    "event": "gcp_llm.gemini.chat_call_completed",
+                    "model_name": model_name,
+                    "response_length": len(response_text),
+                    "duration_ms": round(duration_ms, 2),
+                }
+            )
+            
+            return (response_text, model_name)
+            
+        except asyncio.TimeoutError:
+            last_error = TimeoutError(f"Gemini chat request timed out after {REQUEST_TIMEOUT_SECONDS} seconds")
+            # Don't retry on timeout - it's not a model availability issue
+            raise last_error
+        except gcp_exceptions.DeadlineExceeded:
+            last_error = TimeoutError(f"Gemini chat request timed out after {REQUEST_TIMEOUT_SECONDS} seconds")
+            raise last_error
+        except gcp_exceptions.NotFound as e:
+            # Model not found or no access - try next fallback
+            error_msg = str(e).lower()
+            if "not found" in error_msg or "no access" in error_msg or "404" in error_msg:
+                logger.warning(
+                    "Model not found or no access, trying fallback",
+                    extra={
+                        "event": "gcp_llm.gemini.model_not_found",
+                        "model_name": model_name,
+                        "error": str(e),
+                        "fallbacks_remaining": len(models_to_try) - models_to_try.index(model_name) - 1,
+                    }
+                )
+                last_error = e
+                continue  # Try next model
+            else:
+                # Other NotFound error - don't retry
+                last_error = RuntimeError(f"Vertex AI API error: {str(e)}")
+                raise last_error
+        except gcp_exceptions.GoogleAPIError as e:
+            # For other API errors, don't retry with fallbacks (likely not model-specific)
+            last_error = RuntimeError(f"Vertex AI API error: {str(e)}")
+            raise last_error
+        except Exception as e:
+            # For other exceptions, don't retry
+            last_error = RuntimeError(f"Unexpected error calling Gemini: {str(e)}")
+            raise last_error
+    
+    # All models failed
+    raise RuntimeError(f"All models failed. Last error: {str(last_error)}")
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    x_request_id: Optional[str] = Header(None, alias="X-Request-Id")
+):
+    """Generate a chat response using Vertex AI Gemini.
+    
+    Request body (supports two formats):
+    1. New format: {messages: [{role, content}, ...]}
+       - role: "user", "assistant", or "system"
+       - content: Message text
+    2. Legacy format: {prompt: str, context?: str} (for backward compatibility)
+    
+    Response:
+    - reply: Generated response text
+    - model_used: Name of the model that generated the response
+    """
+    start_time = time.time()
+    request_id = x_request_id or str(uuid4())
+    
+    # Support both new (messages) and legacy (prompt/context) formats
+    if request.messages:
+        # New format: messages array
+        messages = request.messages
+        
+        # Validate input
+        if not messages or len(messages) == 0:
+            logger.warning(
+                "Empty messages in chat request",
+                extra={
+                    "event": "gcp_llm.chat.validation_failed",
+                    "request_id": request_id,
+                }
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Messages are required and cannot be empty"
+            )
+        
+        # Extract the last user message
+        user_messages = [m for m in messages if m.role == "user"]
+        if not user_messages:
+            logger.warning(
+                "No user message found in chat request",
+                extra={
+                    "event": "gcp_llm.chat.validation_failed",
+                    "request_id": request_id,
+                }
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="At least one user message is required"
+            )
+        
+        last_user_message = user_messages[-1].content
+        if not last_user_message or not last_user_message.strip():
+            logger.warning(
+                "Empty user message content in chat request",
+                extra={
+                    "event": "gcp_llm.chat.validation_failed",
+                    "request_id": request_id,
+                }
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="User message content cannot be empty"
+            )
+        
+        # Build context from conversation history (all messages except the last user message)
+        context_parts = []
+        for msg in messages[:-1]:  # All messages except the last one
+            if msg.role == "system":
+                context_parts.append(f"System: {msg.content}")
+            elif msg.role == "assistant":
+                context_parts.append(f"Assistant: {msg.content}")
+            elif msg.role == "user":
+                context_parts.append(f"User: {msg.content}")
+        
+        context = "\n".join(context_parts) if context_parts else None
+        prompt = last_user_message
+        message_count = len(messages)
+    elif request.prompt:
+        # Legacy format: prompt/context
+        prompt = request.prompt
+        context = request.context
+        message_count = 1  # Single message in legacy format
+        
+        # Validate input
+        if not prompt or not prompt.strip():
+            logger.warning(
+                "Empty prompt in chat request",
+                extra={
+                    "event": "gcp_llm.chat.validation_failed",
+                    "request_id": request_id,
+                }
+            )
+            raise HTTPException(
+                status_code=400,
+                detail="Prompt is required and cannot be empty"
+            )
+    else:
+        # Neither format provided
+        logger.warning(
+            "Invalid chat request format",
+            extra={
+                "event": "gcp_llm.chat.validation_failed",
+                "request_id": request_id,
+            }
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'messages' array or 'prompt' field is required"
+        )
+    
+    logger.info(
+        "LLM chat started",
+        extra={
+            "event": "gcp_llm.chat.started",
+            "request_id": request_id,
+            "message_count": message_count,
+            "prompt_length": len(prompt),
+            "context_length": len(context) if context else 0,
+            "model_name": MODEL_NAME,
+        }
+    )
+    
+    try:
+        # Call Gemini with the prompt and context (returns reply and model_used)
+        reply, model_used = await call_gemini_chat_async(prompt, context)
+        
+        duration_ms = (time.time() - start_time) * 1000
+        
+        logger.info(
+            "LLM chat completed",
+            extra={
+                "event": "llm.chat.success",
+                "request_id": request_id,
+                "model_used": model_used,
+                "message_count": message_count,
+                "prompt_length": len(prompt),
+                "context_length": len(context) if context else 0,
+                "reply_length": len(reply),
+                "duration_ms": round(duration_ms, 2),
+            }
+        )
+        
+        return ChatResponse(reply=reply, model_used=model_used)
+        
+    except TimeoutError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "LLM chat timed out",
+            extra={
+                "event": "llm.chat.fail",
+                "request_id": request_id,
+                "model_used": "none",
+                "error_type": "TimeoutError",
+                "message_count": message_count,
+                "duration_ms": round(duration_ms, 2),
+                "error": str(e),
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request timed out: {str(e)}"
+        )
+    except gcp_exceptions.GoogleAPIError as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "Vertex AI API error during LLM chat",
+            extra={
+                "event": "llm.chat.fail",
+                "request_id": request_id,
+                "model_used": "none",
+                "error_type": "GoogleAPIError",
+                "message_count": message_count,
+                "duration_ms": round(duration_ms, 2),
+                "error": str(e),
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Vertex AI error: {str(e)}"
+        )
+    except Exception as e:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "LLM chat failed",
+            extra={
+                "event": "llm.chat.fail",
+                "request_id": request_id,
+                "model_used": "none",
+                "error_type": type(e).__name__,
+                "message_count": message_count,
+                "duration_ms": round(duration_ms, 2),
+                "error": str(e),
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal error: {str(e)}"
+        )
+
+
+@app.get("/config")
+async def get_config():
+    """Get service configuration for debugging (no secrets).
+    
+    Returns:
+        Dict with model_name, fallbacks, and region
+    """
+    return {
+        "model_name": MODEL_NAME,
+        "fallbacks": MODEL_FALLBACKS,
+        "region": GCP_REGION,
+    }
+
+
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint - returns 200 quickly without downstream calls."""
     return {"status": "ok", "model": MODEL_NAME, "region": GCP_REGION}
 
 

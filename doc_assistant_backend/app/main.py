@@ -67,20 +67,59 @@ app.add_middleware(RequestIdMiddleware)
 # Global exception handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with consistent error response format."""
+    """Handle HTTP exceptions with consistent error response format.
+    
+    If exc.detail is already a normalized error dict, use it directly.
+    Otherwise, normalize it to the standard format.
+    """
     request_id = getattr(request.state, "request_id", None)
     
+    # Check if detail is already a normalized error dict
+    if isinstance(exc.detail, dict) and "error_code" in exc.detail:
+        # Already normalized - use it directly
+        error_response = exc.detail.copy()
+        # Ensure request_id is set
+        if not error_response.get("request_id"):
+            error_response["request_id"] = request_id
+        logger.warning(
+            "HTTP exception",
+            extra={
+                "request_id": request_id,
+                "error_code": error_response.get("error_code"),
+                "status_code": exc.status_code,
+                "path": request.url.path,
+                "method": request.method,
+            }
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_response
+        )
+    
+    # Not normalized - normalize it
     error_code_map = {
         400: "VALIDATION_ERROR",
         401: "UNAUTHORIZED",
         403: "FORBIDDEN",
         404: "NOT_FOUND",
         409: "CONFLICT",
+        413: "PAYLOAD_TOO_LARGE",
         422: "VALIDATION_ERROR",
         500: "INTERNAL_ERROR",
+        502: "BAD_GATEWAY",
+        504: "GATEWAY_TIMEOUT",
     }
     
     error_code = error_code_map.get(exc.status_code, "HTTP_ERROR")
+    
+    # Convert detail to string message
+    if isinstance(exc.detail, dict):
+        # If detail is a dict, try to extract a message
+        message = exc.detail.get("message", str(exc.detail))
+        details = exc.detail.get("details")
+    else:
+        message = str(exc.detail) if exc.detail else "An error occurred"
+        details = None
     
     logger.warning(
         "HTTP exception",
@@ -90,7 +129,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "status_code": exc.status_code,
             "path": request.url.path,
             "method": request.method,
-            "detail": exc.detail,
         }
     )
     
@@ -98,7 +136,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={
             "error_code": error_code,
-            "message": exc.detail or "An error occurred",
+            "message": message,
+            "details": details,
             "request_id": request_id,
         }
     )
@@ -106,19 +145,27 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Handle all other exceptions with consistent error response format."""
+    """Handle all other exceptions with consistent error response format.
+    
+    This handler catches any unhandled exceptions and ensures they are:
+    - Logged with full stacktrace (exc_info=True)
+    - Returned as JSON with error_code and request_id
+    - Never expose internal error details to clients
+    """
     request_id = getattr(request.state, "request_id", None)
     
+    # Log with full stacktrace to stdout/stderr (Cloud Run will capture this)
     logger.error(
         "Unhandled exception",
         extra={
             "request_id": request_id,
             "error_code": "INTERNAL_ERROR",
             "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
             "path": request.url.path,
             "method": request.method,
         },
-        exc_info=True
+        exc_info=True  # This ensures full stacktrace is logged
     )
     
     return JSONResponse(

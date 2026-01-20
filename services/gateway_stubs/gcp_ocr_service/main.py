@@ -113,6 +113,9 @@ def extract_text_from_gcs_async(bucket: str, object_path: str, output_bucket: st
         
     Returns:
         Tuple of (text, page_count, language)
+        
+    Raises:
+        HTTPException: For all errors (504 for timeout, 502 for API errors)
     """
     # Create unique output path
     job_id = str(uuid.uuid4())
@@ -152,26 +155,101 @@ def extract_text_from_gcs_async(bucket: str, object_path: str, output_bucket: st
         )
     )
     
-    operation = vision_client.async_batch_annotate_files(requests=[async_request])
-    
-    # Poll for completion
-    start_time = time.time()
-    while not operation.done():
-        if time.time() - start_time > OCR_TIMEOUT_SECONDS:
-            raise TimeoutError(f"OCR operation timed out after {OCR_TIMEOUT_SECONDS} seconds")
-        time.sleep(2)
-        operation.reload()
-    
-    # Check for errors
-    if operation.error:
-        raise RuntimeError(f"Vision API operation error: {operation.error}")
+    try:
+        operation = vision_client.async_batch_annotate_files(requests=[async_request])
+        
+        # Wait for operation completion using result() with timeout
+        # This replaces the polling loop with operation.reload()
+        try:
+            operation.result(timeout=OCR_TIMEOUT_SECONDS)
+        except gcp_exceptions.DeadlineExceeded:
+            logger.error(
+                "OCR operation timed out",
+                extra={
+                    "event": "gcp_ocr.extract.timeout",
+                    "storage_key": f"gs://{bucket}/{object_path}",
+                    "timeout_seconds": OCR_TIMEOUT_SECONDS,
+                }
+            )
+            raise HTTPException(
+                status_code=504,
+                detail=f"OCR operation timed out after {OCR_TIMEOUT_SECONDS} seconds"
+            )
+        
+        # Check for operation errors
+        if hasattr(operation, 'error') and operation.error:
+            error_msg = f"Vision API operation error: {operation.error}"
+            logger.error(
+                "OCR operation failed",
+                extra={
+                    "event": "gcp_ocr.extract.operation_error",
+                    "storage_key": f"gs://{bucket}/{object_path}",
+                    "error": error_msg,
+                }
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=error_msg
+            )
+    except HTTPException:
+        # Re-raise HTTPExceptions (timeout, operation errors)
+        raise
+    except Exception as e:
+        # Catch any other exceptions (AttributeError, etc.) and convert to HTTPException
+        error_msg = f"Vision API error: {str(e)}"
+        logger.error(
+            "OCR operation failed",
+            extra={
+                "event": "gcp_ocr.extract.failure",
+                "storage_key": f"gs://{bucket}/{object_path}",
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=error_msg
+        )
     
     # Read output files from GCS
-    output_bucket_obj = storage_client.bucket(output_bucket)
-    blobs = list(output_bucket_obj.list_blobs(prefix=output_path))
-    
-    if not blobs:
-        raise RuntimeError("No output files found from Vision API")
+    try:
+        output_bucket_obj = storage_client.bucket(output_bucket)
+        blobs = list(output_bucket_obj.list_blobs(prefix=output_path))
+        
+        if not blobs:
+            error_msg = "No output files found from Vision API"
+            logger.error(
+                "OCR operation failed - no output files",
+                extra={
+                    "event": "gcp_ocr.extract.no_output",
+                    "storage_key": f"gs://{bucket}/{object_path}",
+                    "output_path": output_path,
+                }
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=error_msg
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Catch any AttributeError or other exceptions when accessing GCS
+        error_msg = f"Error reading OCR output from GCS: {str(e)}"
+        logger.error(
+            "OCR operation failed - GCS read error",
+            extra={
+                "event": "gcp_ocr.extract.gcs_error",
+                "storage_key": f"gs://{bucket}/{object_path}",
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=error_msg
+        )
     
     # Sort blobs by name (to maintain page order)
     blobs.sort(key=lambda b: b.name)
@@ -181,32 +259,50 @@ def extract_text_from_gcs_async(bucket: str, object_path: str, output_bucket: st
     page_count = 0
     detected_languages = []
     
-    for blob in blobs:
-        if blob.name.endswith('.json'):
-            # Read JSON response
-            json_content = blob.download_as_text()
-            response_data = json.loads(json_content)
-            
-            # Extract text from responses
-            if 'responses' in response_data:
-                for response in response_data['responses']:
-                    if 'fullTextAnnotation' in response:
-                        annotation = response['fullTextAnnotation']
-                        if 'text' in annotation:
-                            full_text_parts.append(annotation['text'])
-                            # Count pages from annotation
+    try:
+        for blob in blobs:
+            if blob.name.endswith('.json'):
+                # Read JSON response
+                json_content = blob.download_as_text()
+                response_data = json.loads(json_content)
+                
+                # Extract text from responses
+                if 'responses' in response_data:
+                    for response in response_data['responses']:
+                        if 'fullTextAnnotation' in response:
+                            annotation = response['fullTextAnnotation']
+                            if 'text' in annotation:
+                                full_text_parts.append(annotation['text'])
+                                # Count pages from annotation
+                                if 'pages' in annotation:
+                                    page_count += len(annotation['pages'])
+                                else:
+                                    page_count += 1
+                            
+                            # Extract language if available
                             if 'pages' in annotation:
-                                page_count += len(annotation['pages'])
-                            else:
-                                page_count += 1
-                        
-                        # Extract language if available
-                        if 'pages' in annotation:
-                            for page in annotation['pages']:
-                                if 'property' in page and 'detectedLanguages' in page['property']:
-                                    for lang in page['property']['detectedLanguages']:
-                                        if lang.get('languageCode'):
-                                            detected_languages.append(lang['languageCode'])
+                                for page in annotation['pages']:
+                                    if 'property' in page and 'detectedLanguages' in page['property']:
+                                        for lang in page['property']['detectedLanguages']:
+                                            if lang.get('languageCode'):
+                                                detected_languages.append(lang['languageCode'])
+    except Exception as e:
+        # Catch any AttributeError or other exceptions when parsing JSON
+        error_msg = f"Error parsing OCR output JSON: {str(e)}"
+        logger.error(
+            "OCR operation failed - JSON parse error",
+            extra={
+                "event": "gcp_ocr.extract.parse_error",
+                "storage_key": f"gs://{bucket}/{object_path}",
+                "error": error_msg,
+                "error_type": type(e).__name__,
+            },
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=error_msg
+        )
     
     full_text = "\n\n".join(full_text_parts)
     # If no pages counted, estimate from number of output files
@@ -334,31 +430,25 @@ async def extract_document(
                     page_count=page_count,
                     language=language
                 )
-            except TimeoutError as e:
-                logger.error(
-                    "OCR operation timed out",
-                    extra={
-                        "storage_key": storage_key,
-                        "error": str(e),
-                    },
-                    exc_info=True
-                )
-                raise HTTPException(
-                    status_code=504,
-                    detail=f"OCR operation timed out: {str(e)}"
-                )
+            except HTTPException:
+                # Re-raise HTTPExceptions (already properly formatted)
+                raise
             except Exception as e:
+                # Catch any unexpected exceptions and convert to HTTPException
+                error_msg = f"Vision API error: {str(e)}"
                 logger.error(
-                    "Vision API error during async OCR",
+                    "OCR operation failed",
                     extra={
+                        "event": "gcp_ocr.extract.failure",
                         "storage_key": storage_key,
-                        "error": str(e),
+                        "error": error_msg,
+                        "error_type": type(e).__name__,
                     },
                     exc_info=True
                 )
                 raise HTTPException(
                     status_code=502,
-                    detail=f"Vision API error: {str(e)}"
+                    detail=error_msg
                 )
         
         # Handle images with direct Vision API

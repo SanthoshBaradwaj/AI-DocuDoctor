@@ -79,8 +79,14 @@ class OcrService(Protocol):
 class FakeLLMService:
     """Fake LLM service for local development."""
     
-    def generate(self, prompt: str, context: str = "") -> str:
-        """Generate a response for chat/conversation."""
+    def generate(self, prompt: str, context: str = "", request_id: Optional[str] = None) -> str:
+        """Generate a response for chat/conversation.
+        
+        Args:
+            prompt: The user's prompt/question
+            context: Optional context (e.g., document content)
+            request_id: Optional request ID (ignored in fake service)
+        """
         if context:
             return f"(dev mock) Context: {context[:50]}... Response to: {prompt}"
         return f"(dev mock) {prompt}"
@@ -134,16 +140,20 @@ class FakeLLMService:
 class HttpLlmService:
     """HTTP-based LLM service that calls an external LLM microservice."""
     
-    def __init__(self, base_url: str, http_client: Optional[httpx.Client] = None, timeout: Optional[float] = None):
+    def __init__(self, base_url: str, http_client: Optional[httpx.Client] = None, timeout: Optional[httpx.Timeout] = None):
         """Initialize HTTP LLM service.
         
         Args:
             base_url: Base URL of the LLM service (e.g., "http://llm-service:8080")
             http_client: Optional httpx client (creates new one if not provided)
-            timeout: Optional timeout in seconds (default: 10.0)
+            timeout: Optional httpx.Timeout (default: connect=3s, read=20s, total=25s)
         """
         self.base_url = base_url.rstrip('/')
-        self.timeout = timeout or 10.0
+        # Default timeouts: connect=3s, read=20s, total=25s
+        if timeout is None:
+            self.timeout = httpx.Timeout(connect=3.0, read=20.0, write=5.0, pool=3.0)
+        else:
+            self.timeout = timeout
         if http_client is not None:
             self.http_client = http_client
             self._client_provided = True
@@ -152,15 +162,148 @@ class HttpLlmService:
             self._client_provided = False
         self.logger = get_logger(__name__)
     
-    def generate(self, prompt: str, context: str = "") -> str:
+    def generate(self, prompt: str, context: str = "", request_id: Optional[str] = None) -> str:
         """Generate a response for chat/conversation.
         
-        For now, this is a placeholder. HTTP LLM service may support chat
-        in the future, but currently only analyze_document is implemented.
+        Args:
+            prompt: The user's prompt/question
+            context: Optional context (e.g., document content)
+            request_id: Optional request ID to forward to LLM service
+            
+        Returns:
+            Generated response text
+            
+        Raises:
+            httpx.TimeoutException: If the request times out
+            httpx.ConnectError: If connection fails
+            httpx.HTTPStatusError: If the LLM service returns an error status
+            ValueError: If the response format is invalid
         """
-        # For HTTP LLM, chat generation would call a different endpoint
-        # This is a placeholder to satisfy the LLMService Protocol
-        raise NotImplementedError("Chat generation not yet implemented for HttpLlmService")
+        import time
+        start_time = time.time()
+        
+        # Prepare request payload
+        payload = {
+            "prompt": prompt,
+        }
+        if context:
+            payload["context"] = context
+        
+        # Call LLM service chat endpoint
+        endpoint = f"{self.base_url}/chat"
+        
+        # Prepare headers
+        headers = {}
+        if request_id:
+            headers["X-Request-Id"] = request_id
+        
+        try:
+            self.logger.debug(
+                "Calling LLM service for chat generation",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "prompt_length": len(prompt),
+                    "context_length": len(context) if context else 0,
+                }
+            )
+            
+            response = self.http_client.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            
+            # Parse response JSON
+            data = response.json()
+            
+            # Validate response format
+            if not isinstance(data, dict):
+                raise ValueError(f"Invalid response format: expected dict, got {type(data)}")
+            
+            # Extract reply (required)
+            reply = data.get("reply") or data.get("response") or data.get("text")
+            if not reply:
+                raise ValueError("Invalid LLM service response format: missing 'reply', 'response', or 'text' field")
+            
+            if not isinstance(reply, str):
+                raise ValueError(f"Invalid LLM service response format: 'reply' must be a string, got {type(reply)}")
+            
+            duration_ms = (time.time() - start_time) * 1000
+            
+            self.logger.info(
+                "LLM chat generation completed via HTTP service",
+                extra={
+                    "request_id": request_id,
+                    "prompt_length": len(prompt),
+                    "context_length": len(context) if context else 0,
+                    "reply_length": len(reply),
+                    "duration_ms": round(duration_ms, 2),
+                    "status_code": response.status_code,
+                }
+            )
+            
+            return reply
+            
+        except httpx.TimeoutException as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "LLM service chat request timed out",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "prompt_length": len(prompt),
+                    "duration_ms": round(duration_ms, 2),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True
+            )
+            raise
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "LLM service chat request connection failed",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "prompt_length": len(prompt),
+                    "duration_ms": round(duration_ms, 2),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True
+            )
+            raise
+        except httpx.HTTPStatusError as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "LLM service returned error status for chat",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "status_code": e.response.status_code,
+                    "response_text": e.response.text[:200] if e.response.text else None,
+                    "prompt_length": len(prompt),
+                    "duration_ms": round(duration_ms, 2),
+                },
+                exc_info=True
+            )
+            raise
+        except (KeyError, ValueError, TypeError) as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "Invalid LLM service chat response format",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "error": str(e),
+                    "prompt_length": len(prompt),
+                    "duration_ms": round(duration_ms, 2),
+                },
+                exc_info=True
+            )
+            raise ValueError(f"Invalid LLM service response: {str(e)}") from e
     
     def analyze_document(
         self,
@@ -168,6 +311,7 @@ class HttpLlmService:
         text: str,
         mime_type: Optional[str] = None,
         doc_type: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> LlmResult:
         """Analyze a document by calling HTTP LLM service.
         
@@ -175,6 +319,7 @@ class HttpLlmService:
             text: The document text content (from OCR)
             mime_type: Optional MIME type of the document
             doc_type: Optional document type (e.g., "PASSPORT", "BANK_STATEMENT")
+            request_id: Optional request ID to forward to LLM service
             
         Returns:
             LlmResult with summary and entities
@@ -183,6 +328,9 @@ class HttpLlmService:
             httpx.HTTPError: If the HTTP request fails
             ValueError: If the response format is invalid
         """
+        import time
+        start_time = time.time()
+        
         # Prepare request payload
         payload = {
             "text": text,
@@ -195,10 +343,16 @@ class HttpLlmService:
         # Call LLM service endpoint
         endpoint = f"{self.base_url}/analyze"
         
+        # Prepare headers
+        headers = {}
+        if request_id:
+            headers["X-Request-Id"] = request_id
+        
         try:
             response = self.http_client.post(
                 endpoint,
                 json=payload,
+                headers=headers,
                 timeout=self.timeout
             )
             response.raise_for_status()
@@ -228,37 +382,77 @@ class HttpLlmService:
                 entities=entities
             )
             
+            duration_ms = (time.time() - start_time) * 1000
+            
             # Log metadata only (not full text or summary)
             self.logger.info(
                 "LLM analysis completed via HTTP service",
                 extra={
+                    "request_id": request_id,
                     "text_length": len(text),
                     "summary_length": len(result.summary),
                     "entities_count": len(result.entities),
                     "mime_type": mime_type,
                     "doc_type": doc_type,
+                    "duration_ms": round(duration_ms, 2),
+                    "status_code": response.status_code,
                 }
             )
             
             return result
             
+        except httpx.TimeoutException as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "LLM service analysis request timed out",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "text_length": len(text),
+                    "duration_ms": round(duration_ms, 2),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True
+            )
+            raise
+        except (httpx.ConnectError, httpx.NetworkError) as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.logger.error(
+                "LLM service analysis request connection failed",
+                extra={
+                    "request_id": request_id,
+                    "endpoint": endpoint,
+                    "text_length": len(text),
+                    "duration_ms": round(duration_ms, 2),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True
+            )
+            raise
         except httpx.HTTPStatusError as e:
+            duration_ms = (time.time() - start_time) * 1000
             self.logger.error(
                 "LLM service returned error status",
                 extra={
+                    "request_id": request_id,
                     "status_code": e.response.status_code,
-                    "response_text": e.response.text[:200],  # First 200 chars only
+                    "response_text": e.response.text[:200] if e.response.text else None,
                     "text_length": len(text),
+                    "duration_ms": round(duration_ms, 2),
                 },
                 exc_info=True
             )
             raise
         except httpx.RequestError as e:
+            duration_ms = (time.time() - start_time) * 1000
             self.logger.error(
                 "LLM service request failed",
                 extra={
+                    "request_id": request_id,
                     "error": str(e),
+                    "error_type": type(e).__name__,
                     "text_length": len(text),
+                    "duration_ms": round(duration_ms, 2),
                 },
                 exc_info=True
             )
