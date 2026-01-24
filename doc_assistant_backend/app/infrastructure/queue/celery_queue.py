@@ -141,6 +141,24 @@ def process_document_ocr(self, document_id: int):
         # Update status to ready
         doc.status = "ready"
         set_ocr_status(doc, PipelineStepStatus.READY, reason="OCR completed successfully")
+        
+        # Set llm_status to ready when OCR completes (chat is now available)
+        # This ensures llm_status doesn't remain "pending" when chat is available
+        # Note: llm_status="ready" here means "chat available", not "LLM analysis complete"
+        # The LLM analysis task will still run and update extracted fields, but chat works immediately
+        from app.services.status import set_llm_status
+        if doc.llm_status == PipelineStepStatus.PENDING.value:
+            set_llm_status(doc, PipelineStepStatus.READY, reason="OCR completed - chat now available")
+            task_logger.info(
+                "LLM status set to ready (chat available)",
+                extra={
+                    "event": "ocr.llm_status_ready",
+                    "document_id": document_id,
+                    "celery_task_id": celery_task_id,
+                    "reason": "OCR completed - chat now available",
+                }
+            )
+        
         db.commit()
         
         duration_ms = (time.monotonic() - start_time) * 1000
@@ -299,6 +317,8 @@ def process_document_llm(self, document_id: int):
         )
         
         # Set LLM status to processing using helper
+        # Note: If llm_status is already "ready" (from OCR completion), this will transition to "processing"
+        # to indicate LLM analysis is in progress
         set_llm_status(doc, PipelineStepStatus.PROCESSING, reason="LLM task started")
         db.commit()
         

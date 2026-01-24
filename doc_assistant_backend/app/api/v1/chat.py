@@ -7,6 +7,7 @@ import httpx
 
 from app.core.logging import get_logger
 from app.core.config import get_settings
+from app.core.errors import normalize_error_response, extract_upstream_error_details
 from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
 from app.infrastructure.db.db_helpers import get_document
@@ -16,64 +17,6 @@ from app.infrastructure.ai.base import get_llm_service
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 logger = get_logger(__name__)
 settings = get_settings()
-
-
-def normalize_error_response(
-    error_code: str,
-    message: str,
-    details: dict | None = None,
-    request_id: str | None = None,
-) -> dict:
-    """Normalize error response to consistent format.
-    
-    Args:
-        error_code: Error code string
-        message: Human-readable error message (always a string)
-        details: Optional details object (for upstream errors, etc.)
-        request_id: Optional request ID
-        
-    Returns:
-        Normalized error dict
-    """
-    return {
-        "error_code": error_code,
-        "message": message,
-        "details": details,
-        "request_id": request_id,
-    }
-
-
-def extract_upstream_error_details(response: httpx.Response) -> dict | None:
-    """Extract error details from upstream service response.
-    
-    If the upstream service returns a JSON error body, extract it into details.
-    
-    Args:
-        response: HTTP response from upstream service
-        
-    Returns:
-        Dict with error details or None
-    """
-    try:
-        if response.headers.get("content-type", "").startswith("application/json"):
-            error_body = response.json()
-            if isinstance(error_body, dict):
-                # Extract relevant fields from upstream error
-                details = {}
-                if "error_code" in error_body:
-                    details["upstream_error_code"] = error_body["error_code"]
-                if "message" in error_body:
-                    details["upstream_message"] = error_body["message"]
-                if "details" in error_body:
-                    details["upstream_details"] = error_body["details"]
-                # Include full error body if it's not too large
-                if len(json.dumps(error_body)) < 1000:
-                    details["upstream_response"] = error_body
-                return details if details else None
-    except (json.JSONDecodeError, ValueError, TypeError):
-        # If we can't parse JSON, return None
-        pass
-    return None
 
 
 @router.post("/document/{doc_id}", response_model=ChatResponseOut)
@@ -107,7 +50,13 @@ def chat_with_document(
         # Fetch document
         doc = get_document(db, doc_id)
         if not doc:
-            raise HTTPException(status_code=404, detail="Document not found")
+            error_response = normalize_error_response(
+                error_code="NOT_FOUND",
+                message="Document not found",
+                details={"doc_id": doc_id},
+                request_id=request_id,
+            )
+            raise HTTPException(status_code=404, detail=error_response)
         
         # Build context from document
         context_parts = [f"Document: {doc.title}"]
@@ -126,7 +75,13 @@ def chat_with_document(
         # Get the last user message
         user_messages = [m for m in payload.messages if m.role == "user"]
         if not user_messages:
-            raise HTTPException(status_code=400, detail="No user message found in request")
+            error_response = normalize_error_response(
+                error_code="VALIDATION_ERROR",
+                message="No user message found in request",
+                details={"doc_id": doc_id, "message_count": len(payload.messages)},
+                request_id=request_id,
+            )
+            raise HTTPException(status_code=400, detail=error_response)
         
         last_user_message = user_messages[-1].content
         
@@ -359,7 +314,13 @@ def chat_global(
         # Get the last user message
         user_messages = [m for m in payload.messages if m.role == "user"]
         if not user_messages:
-            raise HTTPException(status_code=400, detail="No user message found in request")
+            error_response = normalize_error_response(
+                error_code="VALIDATION_ERROR",
+                message="No user message found in request",
+                details={"message_count": len(payload.messages)},
+                request_id=request_id,
+            )
+            raise HTTPException(status_code=400, detail=error_response)
         
         last_user_message = user_messages[-1].content
         

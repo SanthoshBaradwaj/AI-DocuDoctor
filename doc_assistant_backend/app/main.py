@@ -24,17 +24,49 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# CORS configuration
-allow_origins = ["*"] if settings.APP_ENV == "local" else ["https://yourdomain.com"]
+# # CORS configuration
+# allow_origins = ["*"] if settings.APP_ENV == "local" else ["https://yourdomain.com"]
+
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=allow_origins,
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+allowed = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "http://localhost:5000",
+  "http://localhost:8000",
+  "http://localhost:8080",
+  # later add your hosted web domain:
+  # "https://your-frontend.web.app",
+  # "https://yourdomain.com",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/health",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/health/deps",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/chat",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages/1",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages/1/reply",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages/1/reply/1",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages/1/reply/1/reply",
+  "https://docassis-api-v3zprkqnta-uc.a.run.app/api/v1/docs/1/chat/messages/1/reply/1/reply/1",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allow_origins,
+    allow_origins=allowed,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
     """Middleware to generate and attach request IDs to requests and responses."""
@@ -173,6 +205,7 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={
             "error_code": "INTERNAL_ERROR",
             "message": "An internal error occurred. Please try again later.",
+            "details": None,
             "request_id": request_id,
         }
     )

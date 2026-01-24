@@ -70,6 +70,12 @@ All endpoints are versioned under `/api/v1/`:
 - **Chat**: `POST /api/v1/chat/document/{doc_id}`, `POST /api/v1/chat/global`
 - **Health**: `GET /api/v1/health`, `GET /api/v1/health/deps`
 
+### Debugging
+
+- **How to debug with request_id**: See `doc_assistant_backend/docs/DEBUGGING_RUNBOOK.md`
+- **Status interpretation**: See `doc_assistant_backend/docs/DEBUGGING_RUNBOOK.md#status-interpretation-guide`
+- **PowerShell scripts**: See `doc_assistant_backend/scripts/` for upload, poll_status, chat, and fetch_logs
+
 See `doc_assistant_backend/docs/EPIC0_SUMMARY.md` for detailed architecture documentation.
 
 ## Frontend Features

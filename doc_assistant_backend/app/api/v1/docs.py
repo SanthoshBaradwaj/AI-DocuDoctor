@@ -6,6 +6,7 @@ from typing import Optional, Literal
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.core.errors import normalize_error_response, map_status_to_error_code
 from app.core.constants import PipelineStepStatus
 from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
@@ -63,9 +64,16 @@ def get_doc(doc_id: str, db: Session = Depends(get_db)):
         }
     )
     
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(404, "Not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     return doc
 
 
@@ -250,7 +258,13 @@ def process_document(
     # Get document
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message=f"Document {doc_id} not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     logger.info(
         "Document processing requested",
@@ -289,7 +303,13 @@ def process_document(
     # Re-fetch document from DB to get latest persisted values
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(status_code=404, detail=f"Document {doc_id} not found after processing")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message=f"Document {doc_id} not found after processing",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     # Determine overall success (all requested steps succeeded)
     overall_success = all(
@@ -327,7 +347,11 @@ def process_document(
 
 
 @router.post("/analyze", response_model=DocDetailOut)
-def analyze_one(payload: AnalyzeIn, db: Session = Depends(get_db)):
+def analyze_one(
+    payload: AnalyzeIn,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Analyze a single document.
     
     TODO: This endpoint is transitional and will be superseded by the new async pipeline
@@ -335,15 +359,28 @@ def analyze_one(payload: AnalyzeIn, db: Session = Depends(get_db)):
     
     This endpoint now uses the LlmService abstraction instead of direct extraction logic.
     """
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, payload.docId)
     if not doc:
-        raise HTTPException(404, "Not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": payload.docId},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     # Use LlmService abstraction instead of direct extraction
     from app.infrastructure.ai.base import get_llm_service
     
     if not doc.body:
-        raise HTTPException(400, "Document has no text content. OCR may not have completed yet.")
+        error_response = normalize_error_response(
+            error_code="VALIDATION_ERROR",
+            message="Document has no text content. OCR may not have completed yet.",
+            details={"doc_id": payload.docId},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=400, detail=error_response)
     
     llm_service = get_llm_service()
     llm_result = llm_service.analyze_document(
@@ -403,15 +440,26 @@ def analyze_batch(payload: BatchAnalyzeIn, db: Session = Depends(get_db)):
 
 
 @router.post("/{doc_id}/reprocess/ocr")
-def reprocess_ocr(doc_id: str, db: Session = Depends(get_db)):
+def reprocess_ocr(
+    doc_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Reprocess OCR for a document.
     
     Resets OCR and LLM statuses to pending and enqueues OCR task.
     This will trigger a fresh OCR run, followed by LLM analysis.
     """
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(404, "Document not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     # Reset statuses for reprocessing using helpers
     doc.status = "processing"
@@ -435,22 +483,36 @@ def reprocess_ocr(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{doc_id}/reprocess/llm")
-def reprocess_llm(doc_id: str, db: Session = Depends(get_db)):
+def reprocess_llm(
+    doc_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Reprocess LLM analysis for a document.
     
     Requires that OCR has already completed (document.body must be present).
     Resets LLM status to pending and enqueues LLM task.
     """
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(404, "Document not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     # Verify OCR has completed
     if not doc.body:
-        raise HTTPException(
-            400,
-            "OCR not completed; cannot reprocess LLM. Document has no text content."
+        error_response = normalize_error_response(
+            error_code="VALIDATION_ERROR",
+            message="OCR not completed; cannot reprocess LLM. Document has no text content.",
+            details={"doc_id": doc_id},
+            request_id=request_id,
         )
+        raise HTTPException(status_code=400, detail=error_response)
     
     # Reset LLM status for reprocessing using helper
     set_llm_status(doc, PipelineStepStatus.PENDING, reason="LLM reprocessing requested")
@@ -472,11 +534,22 @@ def reprocess_llm(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/download")
-def presigned_download(doc_id: str, db: Session = Depends(get_db)):
+def presigned_download(
+    doc_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Return a short-lived URL to download the original file from storage."""
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(404, "Not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     storage = get_storage_backend()
     url = storage.presign_download(doc.s3_key, expires_in=300)  # 5 minutes
@@ -484,15 +557,26 @@ def presigned_download(doc_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{doc_id}/status", response_model=dict)
-def get_doc_status(doc_id: str, db: Session = Depends(get_db)):
+def get_doc_status(
+    doc_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+):
     """Get document processing status and last error (if any).
     
     Returns:
         Dict with status, ocr_status, llm_status, and last_error fields
     """
+    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
-        raise HTTPException(404, "Document not found")
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
     
     # Extract error messages from extracted field
     extracted = doc.extracted or {}

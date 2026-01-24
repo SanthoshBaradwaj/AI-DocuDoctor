@@ -7,7 +7,7 @@ import 'chat_controller.dart';
 import 'chat_models.dart';
 
 class ChatPage extends ConsumerStatefulWidget {
-  final int? docId; // Optional document ID for document-scoped chat
+  final String? docId; // Optional document ID for document-scoped chat
   const ChatPage({super.key, this.docId});
 
   @override

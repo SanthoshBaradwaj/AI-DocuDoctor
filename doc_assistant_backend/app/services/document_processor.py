@@ -248,6 +248,23 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
         doc.status = "ready"
         set_ocr_status(doc, PipelineStepStatus.READY, reason="OCR completed successfully")
         
+        # Set llm_status to ready when OCR completes (chat is now available)
+        # This ensures llm_status doesn't remain "pending" when chat is available
+        # Note: llm_status="ready" here means "chat available", not "LLM analysis complete"
+        # The LLM analysis task will still run and update extracted fields, but chat works immediately
+        from app.services.status import set_llm_status
+        if doc.llm_status == PipelineStepStatus.PENDING.value:
+            set_llm_status(doc, PipelineStepStatus.READY, reason="OCR completed - chat now available")
+            logger.info(
+                "LLM status set to ready (chat available)",
+                extra={
+                    "event": "ocr.llm_status_ready",
+                    "request_id": request_id,
+                    "document_id": document_id,
+                    "reason": "OCR completed - chat now available",
+                }
+            )
+        
         # Explicitly update document in Firestore (SQLAlchemy tracks changes automatically)
         # Log backend type once per processing request
         from app.infrastructure.db.db_helpers import is_firestore_adapter
@@ -435,6 +452,8 @@ def process_document_llm_sync(doc: Document, db) -> dict:
         )
         
         # Set LLM status to processing using helper
+        # Note: If llm_status is already "ready" (from OCR completion), this will transition to "processing"
+        # to indicate LLM analysis is in progress
         set_llm_status(doc, PipelineStepStatus.PROCESSING, reason="LLM task started")
         update_document(db, doc)
         db.commit()

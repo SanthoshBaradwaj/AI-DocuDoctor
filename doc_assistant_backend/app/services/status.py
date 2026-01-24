@@ -49,10 +49,15 @@ def set_llm_status(doc: Document, new_status: PipelineStepStatus, *, reason: str
     """Set LLM status with validation of allowed transitions.
     
     Allowed transitions:
-    - pending -> processing
+    - pending -> ready (when OCR completes, chat becomes available)
+    - pending -> processing (when LLM analysis task starts)
     - processing -> ready/error
     - error -> pending (reprocessing)
     - ready -> pending (reprocessing)
+    
+    Note: llm_status="ready" can mean either:
+    - "chat available" (set when OCR completes)
+    - "LLM analysis complete" (set when LLM analysis finishes)
     
     Args:
         doc: Document instance
@@ -63,10 +68,16 @@ def set_llm_status(doc: Document, new_status: PipelineStepStatus, *, reason: str
     
     # Define allowed transitions
     allowed_transitions = {
-        PipelineStepStatus.PENDING: {PipelineStepStatus.PROCESSING},
+        PipelineStepStatus.PENDING: {
+            PipelineStepStatus.PROCESSING,  # LLM analysis task starts
+            PipelineStepStatus.READY,  # OCR completes, chat available
+        },
         PipelineStepStatus.PROCESSING: {PipelineStepStatus.READY, PipelineStepStatus.ERROR},
         PipelineStepStatus.ERROR: {PipelineStepStatus.PENDING},  # Reprocessing
-        PipelineStepStatus.READY: {PipelineStepStatus.PENDING},  # Reprocessing
+        PipelineStepStatus.READY: {
+            PipelineStepStatus.PENDING,  # Reprocessing
+            PipelineStepStatus.PROCESSING,  # LLM analysis starts (even if already ready from OCR)
+        },
     }
     
     if new_status not in allowed_transitions.get(current, set()):

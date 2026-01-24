@@ -3,7 +3,7 @@ import '../../services/api_client.dart';
 import '../../models/chat.dart';
 
 class ChatSheet extends StatefulWidget {
-  final int docId;
+  final String docId;
   const ChatSheet({super.key, required this.docId});
 
   @override

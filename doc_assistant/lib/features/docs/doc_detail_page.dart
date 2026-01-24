@@ -4,7 +4,7 @@ import '../../services/api_client.dart';
 import '../../models/doc.dart';
 
 class DocDetailPage extends StatefulWidget {
-  final int docId;
+  final String docId;
   const DocDetailPage({super.key, required this.docId});
 
   @override

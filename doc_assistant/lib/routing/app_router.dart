@@ -45,7 +45,7 @@ final appRouter = GoRouter(
       path: '/docs/:id',
       builder: (context, state) {
         final idStr = state.pathParameters['id']!;
-        return DocDetailPage(docId: int.parse(idStr));
+        return DocDetailPage(docId: idStr); // Backend returns string IDs
       },
     ),
     GoRoute(
@@ -53,8 +53,14 @@ final appRouter = GoRouter(
       builder: (context, state) {
         // Check for docId query parameter
         final docIdStr = state.uri.queryParameters['docId'];
-        final docId = docIdStr != null ? int.tryParse(docIdStr) : null;
-        return ChatPage(docId: docId);
+        return ChatPage(docId: docIdStr); // Backend returns string IDs
+      },
+    ),
+    GoRoute(
+      path: '/chat/:docId',
+      builder: (context, state) {
+        final docIdStr = state.pathParameters['docId']!;
+        return ChatPage(docId: docIdStr); // Backend returns string IDs
       },
     ),
     GoRoute(

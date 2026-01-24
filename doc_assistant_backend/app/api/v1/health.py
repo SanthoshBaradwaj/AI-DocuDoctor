@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+import os
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -25,12 +26,27 @@ logger = get_logger(__name__)
 
 @router.get("")
 def health():
-    """Basic health check endpoint."""
-    return {
+    """Basic health check endpoint - returns quickly with no downstream calls.
+    
+    Returns:
+        Dict with status, app info, and optional build/version info
+    """
+    response = {
         "status": "ok",
         "app_env": settings.APP_ENV,
         "app_name": settings.APP_NAME,
     }
+    
+    # Add build/version info if available from environment
+    build_id = os.getenv("BUILD_ID") or os.getenv("GITHUB_SHA") or os.getenv("CI_COMMIT_SHA")
+    version = os.getenv("VERSION") or os.getenv("APP_VERSION") or os.getenv("IMAGE_TAG")
+    
+    if build_id:
+        response["build"] = build_id
+    if version:
+        response["version"] = version
+    
+    return response
 
 
 @router.get("/deps")

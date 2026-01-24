@@ -1,8 +1,12 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:go_router/go_router.dart';
 import 'package:dio/dio.dart';
 import '../../services/api_client.dart';
+import '../../services/status_poller.dart';
+import '../../models/api_error.dart';
+import '../../widgets/error_dialog.dart';
 
 class UploadPage extends StatefulWidget {
   const UploadPage({super.key});
@@ -102,14 +106,21 @@ class _UploadPageState extends State<UploadPage> {
           'jpeg',
           'png'
         ],
+        withData: true,
       );
       if (picked == null) {
         setState(() => _busy = false);
         return;
       }
       final f = picked.files.first;
-      if (f.path == null && f.bytes == null) {
-        throw 'File path or bytes is null';
+
+      // On web, f.path throws - only use f.bytes
+      // On mobile/desktop, use f.path
+      if (kIsWeb && f.bytes == null) {
+        throw 'Web upload requires file bytes';
+      }
+      if (!kIsWeb && f.path == null) {
+        throw 'Mobile/desktop upload requires file path';
       }
 
       final api = ApiClient();
@@ -128,76 +139,28 @@ class _UploadPageState extends State<UploadPage> {
 
       final storageKey = initResult.storageKey;
       final uploadUrl = initResult.uploadUrl;
-      final uploadFields = initResult.uploadFields;
 
       if (fileSize > initResult.maxSizeBytes) {
         throw 'File size exceeds maximum allowed size (${initResult.maxSizeBytes} bytes)';
       }
 
-      // Step B: Upload file to presigned URL
+      // Step B: Upload file to presigned URL (GCS requires HTTP PUT with raw bytes)
       setState(() {
         _currentStep = 'Uploading to storage...';
         _progress = 0.1;
       });
 
-      // Upload file to presigned URL
-      // For web, use bytes directly; for mobile, use file path
-      if (f.bytes != null) {
-        // Web: upload bytes directly
+      // GCS signed URLs require HTTP PUT with raw bytes and Content-Type header
+      if (kIsWeb) {
+        // Web: use bytes directly
         final bytes = f.bytes;
         if (bytes == null) {
           throw Exception("Web upload requires bytes, found null");
         }
 
-        final form = FormData();
-        if (uploadFields != null) {
-          uploadFields
-              .forEach((k, v) => form.fields.add(MapEntry(k, v.toString())));
-        }
-
-        // Upload using bytes
-        final multipartFile = MultipartFile.fromBytes(
-          bytes,
-          filename: f.name,
-        );
-        form.files.add(MapEntry('file', multipartFile));
-
-        final miniDio = Dio(BaseOptions(
-          connectTimeout: const Duration(seconds: 60),
-          sendTimeout: const Duration(minutes: 5),
-          receiveTimeout: const Duration(minutes: 5),
-        ));
-
-        // Replace minio host with localhost for web
-        String finalUrl = uploadUrl;
-        final uri = Uri.parse(uploadUrl);
-        if (uri.host.toLowerCase() == 'minio') {
-          finalUrl = Uri(
-            scheme: uri.scheme,
-            host: 'localhost',
-            port: uri.port,
-            path: uri.path,
-            query: uri.query,
-          ).toString();
-        }
-
-        await miniDio.post(
-          finalUrl,
-          data: form,
-          onSendProgress: (sent, total) {
-            setState(() {
-              _progress = 0.1 + (sent / total) * 0.7; // 10% to 80%
-            });
-          },
-          options: Options(contentType: 'multipart/form-data'),
-        );
-      } else if (f.path != null) {
-        // Mobile: use file path
-        await api.uploadToPresigned(
+        await api.uploadBytesToPresigned(
           url: uploadUrl,
-          fields: uploadFields,
-          filePath: f.path!,
-          fileName: f.name,
+          bytes: bytes,
           contentType: mimeType,
           onSendProgress: (sent, total) {
             setState(() {
@@ -206,7 +169,24 @@ class _UploadPageState extends State<UploadPage> {
           },
         );
       } else {
-        throw 'No file data available';
+        // Mobile/Desktop: use file path
+        // Never access f.path on web - it throws
+        final filePath = f.path;
+        if (filePath == null) {
+          throw 'File path is null';
+        }
+
+        await api.uploadToPresigned(
+          url: uploadUrl,
+          filePath: filePath,
+          fileName: f.name,
+          contentType: mimeType,
+          onSendProgress: (sent, total) {
+            setState(() {
+              _progress = 0.1 + (sent / total) * 0.7; // 10% to 80%
+            });
+          },
+        );
       }
 
       // Step C: Notify backend that upload is complete
@@ -224,18 +204,81 @@ class _UploadPageState extends State<UploadPage> {
         docType: _selectedDocType,
       ));
 
+      // Step D: Poll status until ready
       setState(() {
-        _progress = 1.0;
-        _lastStatus = 'Upload complete! Document ID: ${doc.id}';
-        _currentStep = null;
+        _currentStep = 'Processing document (OCR)...';
+        _progress = 0.95;
       });
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Upload complete ✅')),
+      final poller = StatusPoller(api);
+      try {
+        await poller.pollUntilReady(
+          docId: doc.id,
+          interval: const Duration(seconds: 2),
+          timeout: const Duration(minutes: 5),
+          onStatusUpdate: (status) {
+            if (mounted) {
+              setState(() {
+                if (status.ocrStatus == 'processing') {
+                  _currentStep = 'Processing document (OCR)...';
+                } else if (status.ocrStatus == 'ready' &&
+                    status.llmStatus == 'processing') {
+                  _currentStep = 'Processing document (LLM analysis)...';
+                } else if (status.isReady) {
+                  _currentStep = 'Document ready!';
+                }
+              });
+            }
+          },
         );
-        // Navigate to document detail
-        context.go('/docs/${doc.id}');
+
+        setState(() {
+          _progress = 1.0;
+          _lastStatus = 'Upload complete! Document ID: ${doc.id}';
+          _currentStep = null;
+        });
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Upload complete ✅')),
+          );
+          // Navigate to chat screen
+          context.go('/chat/${doc.id}');
+        }
+      } catch (e) {
+        if (mounted) {
+          if (e is ApiError) {
+            ErrorDialog.show(context, e, title: 'Processing Error');
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Processing failed: $e')),
+            );
+          }
+        }
+        // Still navigate to document detail even if polling failed
+        if (mounted) {
+          context.go('/docs/${doc.id}');
+        }
+      }
+    } on DioException catch (e) {
+      ApiError? apiError;
+      if (e.response != null) {
+        final data = e.response!.data;
+        if (data is Map<String, dynamic> && data.containsKey('error_code')) {
+          apiError = ApiError.fromJson(data);
+        }
+      }
+
+      if (mounted) {
+        if (apiError != null) {
+          ErrorDialog.show(context, apiError, title: 'Upload Error');
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content:
+                    Text('Upload failed: ${e.message ?? "Unknown error"}')),
+          );
+        }
       }
     } catch (e) {
       setState(() {

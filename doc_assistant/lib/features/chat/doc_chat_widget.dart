@@ -21,8 +21,7 @@ class _DocChatWidgetState extends ConsumerState<DocChatWidget> {
 
   @override
   Widget build(BuildContext context) {
-    final docIdInt = int.tryParse(widget.docId) ?? 0;
-    final msgs = ref.watch(docChatControllerProvider(docIdInt));
+    final msgs = ref.watch(docChatControllerProvider(widget.docId));
     return Column(
       children: [
         const SizedBox(height: 8),
@@ -74,7 +73,7 @@ class _DocChatWidgetState extends ConsumerState<DocChatWidget> {
                 final text = _input.text;
                 _input.clear();
                 await ref
-                    .read(docChatControllerProvider(docIdInt).notifier)
+                    .read(docChatControllerProvider(widget.docId).notifier)
                     .send(text);
               },
               icon: const Icon(Icons.send),

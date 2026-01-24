@@ -4,6 +4,7 @@ import '../../services/api_client.dart';
 import 'package:dio/dio.dart';
 import 'chat_models.dart';
 import '../../models/chat.dart' as api_models;
+import '../../models/api_error.dart';
 
 /// Global chat controller (no document context)
 final chatControllerProvider =
@@ -42,13 +43,29 @@ class ChatController extends Notifier<List<ChatMessage>> {
                 content: m.content,
               ))
           .toList();
+    } on ApiError catch (e) {
+      state = [
+        ...state,
+        ChatMessage(
+            id: _uuid.v4(),
+            role: 'assistant',
+            content: 'Error: ${e.friendlyMessage}${e.requestId != null ? "\n\nRequest ID: ${e.requestId}" : ""}')
+      ];
     } on DioException catch (e) {
       state = [
         ...state,
         ChatMessage(
             id: _uuid.v4(),
             role: 'assistant',
-            content: 'Chat error: ${e.message}')
+            content: 'Network error: ${e.message ?? "Unknown error"}')
+      ];
+    } catch (e) {
+      state = [
+        ...state,
+        ChatMessage(
+            id: _uuid.v4(),
+            role: 'assistant',
+            content: 'Error: $e')
       ];
     }
   }
@@ -65,15 +82,15 @@ class ChatController extends Notifier<List<ChatMessage>> {
 
 /// Document-scoped chat controller
 final docChatControllerProvider =
-    NotifierProvider.family<DocChatController, List<ChatMessage>, int>(
+    NotifierProvider.family<DocChatController, List<ChatMessage>, String>(
   DocChatController.new,
 );
 
-class DocChatController extends FamilyNotifier<List<ChatMessage>, int> {
+class DocChatController extends FamilyNotifier<List<ChatMessage>, String> {
   final _uuid = const Uuid();
 
   @override
-  List<ChatMessage> build(int docId) {
+  List<ChatMessage> build(String docId) {
     return [
       ChatMessage(
           id: _uuid.v4(),
@@ -106,13 +123,29 @@ class DocChatController extends FamilyNotifier<List<ChatMessage>, int> {
                 content: m.content,
               ))
           .toList();
+    } on ApiError catch (e) {
+      state = [
+        ...state,
+        ChatMessage(
+            id: _uuid.v4(),
+            role: 'assistant',
+            content: 'Error: ${e.friendlyMessage}${e.requestId != null ? "\n\nRequest ID: ${e.requestId}" : ""}')
+      ];
     } on DioException catch (e) {
       state = [
         ...state,
         ChatMessage(
             id: _uuid.v4(),
             role: 'assistant',
-            content: 'Chat error: ${e.message}')
+            content: 'Network error: ${e.message ?? "Unknown error"}')
+      ];
+    } catch (e) {
+      state = [
+        ...state,
+        ChatMessage(
+            id: _uuid.v4(),
+            role: 'assistant',
+            content: 'Error: $e')
       ];
     }
   }

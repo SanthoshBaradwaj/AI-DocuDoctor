@@ -39,7 +39,7 @@ class AppTheme {
         fillColor:
             b == Brightness.light ? Colors.white : const Color(0xFF1A1A1F),
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         elevation: 0,
         color: b == Brightness.light ? Colors.white : const Color(0xFF16161A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),

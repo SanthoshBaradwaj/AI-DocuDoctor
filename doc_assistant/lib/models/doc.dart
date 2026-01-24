@@ -1,5 +1,5 @@
 class Doc {
-  final int id;
+  final String id;
   final String title;
   final String filename;
   final String status;
@@ -8,6 +8,10 @@ class Doc {
   final String? docType; // DocumentType enum value
   final DateTime? expiryDate;
   final Map<String, dynamic>? extracted;
+  final String?
+      ocrStatus; // OCR pipeline status: pending, processing, ready, error
+  final String?
+      llmStatus; // LLM pipeline status: pending, processing, ready, error
 
   Doc({
     required this.id,
@@ -19,6 +23,8 @@ class Doc {
     this.docType,
     this.expiryDate,
     this.extracted,
+    this.ocrStatus,
+    this.llmStatus,
   });
 
   factory Doc.fromJson(Map<String, dynamic> j) {
@@ -35,7 +41,8 @@ class Doc {
     }
 
     return Doc(
-      id: j['id'] as int,
+      id: j['id']
+          .toString(), // Backend returns string IDs (or int that we convert)
       title: (j['title'] ?? '') as String,
       filename: (j['filename'] ?? '') as String,
       status: (j['status'] ?? '') as String,
@@ -46,6 +53,8 @@ class Doc {
       extracted: (j['extracted'] is Map)
           ? (j['extracted'] as Map).cast<String, dynamic>()
           : null,
+      ocrStatus: j['ocr_status'] as String?,
+      llmStatus: j['llm_status'] as String?,
     );
   }
 
@@ -59,7 +68,21 @@ class Doc {
         if (docType != null) 'doc_type': docType,
         if (expiryDate != null) 'expiry_date': expiryDate!.toIso8601String(),
         if (extracted != null) 'extracted': extracted,
+        if (ocrStatus != null) 'ocr_status': ocrStatus,
+        if (llmStatus != null) 'llm_status': llmStatus,
       };
+
+  /// Check if chat is available (OCR ready and LLM ready)
+  bool get isChatAvailable {
+    return ocrStatus == 'ready' && llmStatus == 'ready';
+  }
+
+  /// Check if document is still processing
+  bool get isProcessing {
+    return ocrStatus == 'processing' ||
+        llmStatus == 'processing' ||
+        status == 'processing';
+  }
 }
 
 class DocDetail extends Doc {
@@ -76,6 +99,8 @@ class DocDetail extends Doc {
     super.docType,
     super.expiryDate,
     super.extracted,
+    super.ocrStatus,
+    super.llmStatus,
   });
 
   factory DocDetail.fromJson(Map<String, dynamic> j) {
@@ -92,7 +117,7 @@ class DocDetail extends Doc {
     }
 
     return DocDetail(
-      id: j['id'] as int,
+      id: j['id'].toString(), // Backend returns string IDs
       title: (j['title'] ?? '') as String,
       filename: (j['filename'] ?? '') as String,
       status: (j['status'] ?? '') as String,
@@ -104,6 +129,8 @@ class DocDetail extends Doc {
       extracted: (j['extracted'] is Map)
           ? (j['extracted'] as Map).cast<String, dynamic>()
           : null,
+      ocrStatus: j['ocr_status'] as String?,
+      llmStatus: j['llm_status'] as String?,
     );
   }
 
