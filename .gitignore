@@ -1,0 +1,66 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+credentials.json
+service-account*.json
+gcloud-credentials*.json
+kaggle.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+venv/
+env/
+.venv/
+dist/
+build/
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Flutter/Dart (covered by doc_assistant/.gitignore but belt-and-suspenders)
+.dart_tool/
+.packages
+pubspec.lock
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Storage uploads (local dev)
+doc_assistant_backend/storage/uploads/
+doc_assistant_backend/storage/*.tmp
