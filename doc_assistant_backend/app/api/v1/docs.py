@@ -12,7 +12,7 @@ from app.infrastructure.db.db_factory import get_db
 from app.infrastructure.db.models import Document
 from app.infrastructure.db.db_helpers import get_document
 from app.schemas import (
-    DocOut, DocDetailOut, UploadInitIn, UploadInitOut, UploadNotifyIn,
+    DocOut, DocDetailOut, DocMetaOut, UploadInitIn, UploadInitOut, UploadNotifyIn,
     AnalyzeIn, BatchAnalyzeIn  # Keep for backward compatibility
 )
 from app.infrastructure.storage.storage_factory import get_storage_backend
@@ -50,21 +50,24 @@ def list_docs(
 
 
 @router.get("/{doc_id}", response_model=DocDetailOut)
-def get_doc(doc_id: str, db: Session = Depends(get_db)):
+def get_doc(doc_id: str, request: Request, db: Session = Depends(get_db)):
     """Get full details of a single document."""
     # Self-check: Log database backend type for debugging
     from app.infrastructure.db.db_helpers import is_firestore_adapter
     is_firestore = is_firestore_adapter(db)
+    request_id = getattr(request.state, "request_id", None)
+    
     logger.debug(
         "Get document request",
         extra={
+            "event": "docs.get",
+            "request_id": request_id,
             "doc_id": doc_id,
             "db_backend": "firestore" if is_firestore else "sqlalchemy",
             "db_class": db.__class__.__name__,
         }
     )
     
-    request_id = getattr(request.state, "request_id", None)
     doc = get_document(db, doc_id)
     if not doc:
         error_response = normalize_error_response(
@@ -74,6 +77,36 @@ def get_doc(doc_id: str, db: Session = Depends(get_db)):
             request_id=request_id,
         )
         raise HTTPException(status_code=404, detail=error_response)
+    return doc
+
+
+@router.get("/{doc_id}/meta", response_model=DocMetaOut)
+def get_doc_meta(doc_id: str, request: Request, db: Session = Depends(get_db)):
+    """Get document metadata including cost hints (page_count, ocr_chars, llm_chars_sent).
+    
+    This endpoint is for UI to display processing metadata and cost information.
+    """
+    request_id = getattr(request.state, "request_id", None)
+    
+    logger.debug(
+        "Get document metadata request",
+        extra={
+            "event": "docs.meta.get",
+            "request_id": request_id,
+            "doc_id": doc_id,
+        }
+    )
+    
+    doc = get_document(db, doc_id)
+    if not doc:
+        error_response = normalize_error_response(
+            error_code="NOT_FOUND",
+            message="Document not found",
+            details={"doc_id": doc_id},
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=404, detail=error_response)
+    
     return doc
 
 
@@ -92,7 +125,22 @@ def get_presigned_upload(
     
     # Generate unique storage key
     storage_key = f"user_{user_id}/{uuid.uuid4().hex}/{payload.filename}"
-    max_size_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    # Use MAX_UPLOAD_BYTES if set, otherwise fall back to MAX_UPLOAD_MB
+    max_size_bytes = settings.MAX_UPLOAD_BYTES if hasattr(settings, 'MAX_UPLOAD_BYTES') else (settings.MAX_UPLOAD_MB * 1024 * 1024)
+    
+    # Enforce MAX_UPLOAD_BYTES in presign response
+    if payload.size_bytes > max_size_bytes:
+        error_response = normalize_error_response(
+            error_code="PAYLOAD_TOO_LARGE",
+            message=f"File size ({payload.size_bytes} bytes) exceeds maximum allowed size ({max_size_bytes} bytes)",
+            details={
+                "size_bytes": payload.size_bytes,
+                "max_size_bytes": max_size_bytes,
+                "filename": payload.filename,
+            },
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=413, detail=error_response)
     
     logger.info(
         "Upload initialization",
@@ -134,9 +182,24 @@ def notify_uploaded(
 ):
     """Notify the backend that file upload is complete and kick off async processing.
     
-    Creates a DB record and enqueues OCR/extraction task.
+    Creates a DB record, validates file size and page count, then enqueues OCR/extraction task.
     """
     request_id = getattr(request.state, "request_id", None)
+    
+    # Enforce MAX_UPLOAD_BYTES
+    max_size_bytes = settings.MAX_UPLOAD_BYTES if hasattr(settings, 'MAX_UPLOAD_BYTES') else (settings.MAX_UPLOAD_MB * 1024 * 1024)
+    if payload.size_bytes > max_size_bytes:
+        error_response = normalize_error_response(
+            error_code="PAYLOAD_TOO_LARGE",
+            message=f"File size ({payload.size_bytes} bytes) exceeds maximum allowed size ({max_size_bytes} bytes)",
+            details={
+                "size_bytes": payload.size_bytes,
+                "max_size_bytes": max_size_bytes,
+                "filename": payload.filename,
+            },
+            request_id=request_id,
+        )
+        raise HTTPException(status_code=413, detail=error_response)
     
     # Validate domain and doc_type if provided
     domain_value = None
@@ -183,33 +246,123 @@ def notify_uploaded(
     db.refresh(doc)
     
     logger.info(
-        "Document upload notified, enqueuing OCR",
+        "Document upload notified",
         extra={
+            "event": "docs.notify",
             "request_id": request_id,
-            "document_id": doc.id,
+            "document_id": str(doc.id),
             "domain": domain_value,
             "doc_type": doc_type_value,
             "file_name": payload.filename,
             "storage_key": payload.storage_key,
             "size_bytes": payload.size_bytes,
+            "mime_type": payload.mime_type,
         }
     )
+    
+    # Count PDF pages if mime_type is application/pdf (CHUNK 1)
+    page_count = None
+    if payload.mime_type == "application/pdf":
+        try:
+            logger.info(
+                "Counting PDF pages",
+                extra={
+                    "event": "docs.pagecount.start",
+                    "request_id": request_id,
+                    "document_id": str(doc.id),
+                    "storage_key": payload.storage_key,
+                }
+            )
+            
+            # Download PDF from storage (server-to-server)
+            storage = get_storage_backend()
+            pdf_bytes = storage.read_bytes(payload.storage_key)
+            
+            # Count pages using pypdf
+            from app.services.pdf_utils import count_pdf_pages
+            page_count = count_pdf_pages(pdf_bytes)
+            
+            # Store page_count in document
+            doc.page_count = page_count
+            db.commit()
+            
+            logger.info(
+                "PDF page count extracted",
+                extra={
+                    "event": "docs.pagecount.success",
+                    "request_id": request_id,
+                    "document_id": str(doc.id),
+                    "page_count": page_count,
+                }
+            )
+            
+            # Check page limit
+            max_pages = settings.MAX_PDF_PAGES if hasattr(settings, 'MAX_PDF_PAGES') else 10
+            if page_count > max_pages:
+                # Set status to failed and skip OCR/LLM
+                doc.status = "error"
+                set_ocr_status(doc, PipelineStepStatus.ERROR, reason=f"Page limit exceeded: {page_count} > {max_pages}")
+                set_llm_status(doc, PipelineStepStatus.ERROR, reason=f"Page limit exceeded: {page_count} > {max_pages}")
+                db.commit()
+                
+                logger.warning(
+                    "PDF page limit exceeded",
+                    extra={
+                        "event": "docs.pagecount.limit_exceeded",
+                        "request_id": request_id,
+                        "document_id": str(doc.id),
+                        "page_count": page_count,
+                        "max_pages": max_pages,
+                    }
+                )
+                
+                error_response = normalize_error_response(
+                    error_code="PAGE_LIMIT_EXCEEDED",
+                    message=f"PDF has {page_count} pages, max allowed is {max_pages}",
+                    details={
+                        "page_count": page_count,
+                        "max_pages": max_pages,
+                        "doc_id": str(doc.id),
+                    },
+                    request_id=request_id,
+                )
+                raise HTTPException(status_code=413, detail=error_response)
+        except HTTPException:
+            # Re-raise HTTP exceptions (like 413 for page limit)
+            raise
+        except Exception as e:
+            # Log error but don't fail the upload - page count is optional
+            logger.error(
+                "Failed to count PDF pages",
+                extra={
+                    "event": "docs.pagecount.fail",
+                    "request_id": request_id,
+                    "document_id": str(doc.id),
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+                exc_info=True
+            )
+            # Continue without page_count - document can still be processed
     
     # Enqueue OCR task (async processing) via TaskQueue abstraction
-    task_queue = get_task_queue()
-    task_queue.enqueue_ocr(doc.id)
-    
-    # Get task queue provider name for logging
-    task_queue_provider = getattr(settings, "TASK_QUEUE_PROVIDER", None) or settings.QUEUE_BACKEND or "celery"
-    
-    logger.info(
-        "OCR task enqueued via TaskQueue",
-        extra={
-            "request_id": request_id,
-            "document_id": doc.id,
-            "queue_backend": task_queue_provider,
-        }
-    )
+    # Only enqueue if page limit check passed (or not a PDF)
+    if doc.status != "error":
+        task_queue = get_task_queue()
+        task_queue.enqueue_ocr(doc.id)
+        
+        # Get task queue provider name for logging
+        task_queue_provider = getattr(settings, "TASK_QUEUE_PROVIDER", None) or settings.QUEUE_BACKEND or "celery"
+        
+        logger.info(
+            "OCR task enqueued via TaskQueue",
+            extra={
+                "event": "docs.ocr.enqueued",
+                "request_id": request_id,
+                "document_id": str(doc.id),
+                "queue_backend": task_queue_provider,
+            }
+        )
     
     return doc
 

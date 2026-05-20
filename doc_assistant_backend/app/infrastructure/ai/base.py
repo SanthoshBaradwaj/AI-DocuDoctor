@@ -63,12 +63,14 @@ class OcrService(Protocol):
         *,
         storage_key: str,
         mime_type: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> OcrResult:
         """Extract text and metadata from a document in storage.
         
         Args:
             storage_key: The storage key/path of the document
             mime_type: Optional MIME type of the document
+            request_id: Optional request ID to forward to OCR service
             
         Returns:
             OcrResult with extracted text and metadata
@@ -577,10 +579,16 @@ class HttpOcrService:
         # Call OCR service endpoint (assumes POST /extract or similar)
         endpoint = f"{self.base_url}/extract"
         
+        # Prepare headers with request_id
+        headers = {}
+        if request_id:
+            headers["X-Request-Id"] = request_id
+        
         try:
             response = self.http_client.post(
                 endpoint,
                 json=payload,
+                headers=headers,
                 timeout=60.0
             )
             response.raise_for_status()
@@ -605,6 +613,8 @@ class HttpOcrService:
             self.logger.info(
                 "OCR extraction completed via HTTP service",
                 extra={
+                    "event": "ocr.finish",
+                    "request_id": request_id,
                     "storage_key": storage_key,
                     "page_count": result.page_count,
                     "language": result.language,
@@ -618,6 +628,8 @@ class HttpOcrService:
             self.logger.error(
                 "OCR service returned error status",
                 extra={
+                    "event": "ocr.fail",
+                    "request_id": request_id,
                     "storage_key": storage_key,
                     "status_code": e.response.status_code,
                     "response_text": e.response.text[:200],  # First 200 chars only
@@ -629,8 +641,11 @@ class HttpOcrService:
             self.logger.error(
                 "OCR service request failed",
                 extra={
+                    "event": "ocr.fail",
+                    "request_id": request_id,
                     "storage_key": storage_key,
                     "error": str(e),
+                    "error_type": type(e).__name__,
                 },
                 exc_info=True
             )
@@ -639,8 +654,11 @@ class HttpOcrService:
             self.logger.error(
                 "Invalid OCR service response format",
                 extra={
+                    "event": "ocr.fail",
+                    "request_id": request_id,
                     "storage_key": storage_key,
                     "error": str(e),
+                    "error_type": type(e).__name__,
                 },
                 exc_info=True
             )

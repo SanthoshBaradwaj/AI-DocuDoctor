@@ -71,3 +71,33 @@ class GCSStorageBackend:
                 object_path = parts[0]
         
         return presign_download_v4(self.bucket, object_path, expires_in)
+    
+    def read_bytes(self, key: str) -> bytes:
+        """Read file content as bytes from GCS (server-to-server).
+        
+        Args:
+            key: The storage key/path for the file (can be object path or gs:// URL)
+            
+        Returns:
+            File content as bytes
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        from app.infrastructure.storage.gcs_storage import read_blob_bytes
+        from google.cloud.exceptions import NotFound
+        
+        # Extract object path from gs:// URL if needed
+        object_path = key
+        if key.startswith("gs://"):
+            # Parse gs://bucket/path -> path
+            parts = key.replace("gs://", "").split("/", 1)
+            if len(parts) > 1:
+                object_path = parts[1]
+            else:
+                object_path = parts[0]
+        
+        try:
+            return read_blob_bytes(self.bucket, object_path)
+        except NotFound:
+            raise FileNotFoundError(f"File not found: {key}")

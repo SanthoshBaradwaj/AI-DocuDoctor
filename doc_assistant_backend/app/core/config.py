@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     S3_USE_SSL: bool = False
     S3_REGION: str = "us-east-1"
     MAX_UPLOAD_MB: int = 25
+    
+    # Cost guardrails (EPIC 3)
+    MAX_UPLOAD_BYTES: int = 15 * 1024 * 1024  # 15MB default
+    MAX_PDF_PAGES: int = 10  # Maximum PDF pages allowed
+    MAX_IMAGES: int = 20  # Maximum images allowed (for future use)
+    MAX_OCR_CHARS: int = 50000  # Maximum OCR text chars sent to LLM
 
     # Queue backend selection
     QUEUE_BACKEND: Literal["celery"] = "celery"

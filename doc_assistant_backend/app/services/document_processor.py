@@ -151,25 +151,27 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
                 ocr_result = ocr_service.extract_document(
                     storage_key=doc.s3_key,
                     mime_type=doc.mime,
+                    request_id=request_id,  # Forward request_id to OCR service
                 )
                 logger.info(
                     "OCR extraction completed",
                     extra={
-                        "event": "ocr.extraction_success",
+                        "event": "ocr.finish",
                         "request_id": request_id,
-                        "document_id": document_id,
+                        "document_id": str(document_id),
                         "page_count": ocr_result.page_count if ocr_result else None,
                         "language": ocr_result.language if ocr_result else None,
                         "text_length": len(ocr_result.text) if ocr_result else 0,
+                        "ocr_chars": len(ocr_result.text) if ocr_result else 0,
                     }
                 )
             except Exception as e:
                 error_msg = f"OCR extraction failed: {str(e)}"
                 # Log with provider URL and response details if available
                 log_extra = {
-                    "event": "ocr.extraction_failure",
+                    "event": "ocr.fail",
                     "request_id": request_id,
-                    "document_id": document_id,
+                    "document_id": str(document_id),
                     "provider": provider,
                     "provider_url": provider_url,
                     "error": error_msg,
@@ -217,11 +219,16 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
     # Step 3: Update document with OCR results
     try:
         # Update document with OCR results
-        doc.body = ocr_result.text
+        # Store full OCR text in body and extracted
+        full_ocr_text = ocr_result.text
+        doc.body = full_ocr_text
+        
+        # Store OCR character count (CHUNK 2: cost hints)
+        doc.ocr_chars = len(full_ocr_text)
         
         # Ensure extracted["text"] is also set for consistency
         extracted_data = doc.extracted or {}
-        extracted_data["text"] = ocr_result.text
+        extracted_data["text"] = full_ocr_text
         extracted_data["ocr"] = {
             "page_count": ocr_result.page_count,
             "language": ocr_result.language,
@@ -318,9 +325,9 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
     logger.info(
         "OCR processing completed successfully",
         extra={
-            "event": "ocr.success",
+            "event": "ocr.finish",
             "request_id": request_id,
-            "document_id": document_id,
+            "document_id": str(document_id),
             "status": doc.status,
             "ocr_status": doc.ocr_status,
             "page_count": ocr_result.page_count,
@@ -330,6 +337,7 @@ def process_document_ocr_sync(doc: Document, db) -> dict:
             "provider": provider,
             "provider_name": provider_name,
             "text_length": len(ocr_result.text),
+            "ocr_chars": len(ocr_result.text),
             "duration_ms": round(duration_ms, 2),
         }
     )
@@ -436,12 +444,13 @@ def process_document_llm_sync(doc: Document, db) -> dict:
         logger.info(
             "LLM analysis started",
             extra={
-                "event": "llm.started",
+                "event": "llm.start",
                 "request_id": request_id,
-                "document_id": document_id,
+                "document_id": str(document_id),
                 "domain": doc.domain,
                 "doc_type": doc.doc_type,
-                "text_length": len(doc.body),
+                "text_length": len(ocr_text_full),
+                "sent_chars": llm_chars_sent,
                 "ocr_status": doc.ocr_status,
                 "llm_status": doc.llm_status,
                 "provider": provider,
@@ -480,11 +489,32 @@ def process_document_llm_sync(doc: Document, db) -> dict:
             pass
         return {"success": False, "document_id": document_id, "step": "llm", "error": error_msg}
     
-    # Step 3: Call LLM service
+    # Step 3: Truncate OCR text before sending to LLM (CHUNK 2: cost guardrails)
+    max_ocr_chars = settings.MAX_OCR_CHARS if hasattr(settings, 'MAX_OCR_CHARS') else 50000
+    ocr_text_full = doc.body
+    ocr_text_truncated = ocr_text_full[:max_ocr_chars] if len(ocr_text_full) > max_ocr_chars else ocr_text_full
+    llm_chars_sent = len(ocr_text_truncated)
+    
+    # Store cost hints
+    doc.llm_chars_sent = llm_chars_sent
+    
+    logger.info(
+        "OCR text prepared for LLM",
+        extra={
+            "event": "llm.text_prepared",
+            "request_id": request_id,
+            "document_id": document_id,
+            "ocr_chars": len(ocr_text_full),
+            "sent_chars": llm_chars_sent,
+            "truncated": len(ocr_text_full) > max_ocr_chars,
+        }
+    )
+    
+    # Step 4: Call LLM service with truncated text
     llm_result = None
     try:
         llm_result = llm_service.analyze_document(
-            text=doc.body,
+            text=ocr_text_truncated,  # Send truncated text to LLM
             mime_type=doc.mime,
             doc_type=doc.doc_type,
         )
@@ -496,6 +526,8 @@ def process_document_llm_sync(doc: Document, db) -> dict:
                 "document_id": document_id,
                 "summary_length": len(llm_result.summary) if llm_result else 0,
                 "entities_count": len(llm_result.entities) if llm_result else 0,
+                "ocr_chars": len(ocr_text_full),
+                "llm_chars_sent": llm_chars_sent,
             }
         )
     except Exception as e:
@@ -617,24 +649,25 @@ def process_document_llm_sync(doc: Document, db) -> dict:
     
     duration_ms = (time.monotonic() - start_time) * 1000
     
-    logger.info(
-        "LLM analysis completed successfully",
-        extra={
-            "event": "llm.success",
-            "request_id": request_id,
-            "document_id": document_id,
-            "domain": doc.domain,
-            "doc_type": doc.doc_type,
-            "text_length": len(doc.body),
-            "ocr_status": doc.ocr_status,
-            "llm_status": doc.llm_status,
-            "provider": provider,
-            "provider_name": provider_name,
-            "summary_length": len(llm_result.summary),
-            "entities_count": len(llm_result.entities),
-            "duration_ms": round(duration_ms, 2),
-        }
-    )
+        logger.info(
+            "LLM analysis completed successfully",
+            extra={
+                "event": "llm.finish",
+                "request_id": request_id,
+                "document_id": str(document_id),
+                "domain": doc.domain,
+                "doc_type": doc.doc_type,
+                "ocr_chars": len(ocr_text_full),
+                "llm_chars_sent": llm_chars_sent,
+                "ocr_status": doc.ocr_status,
+                "llm_status": doc.llm_status,
+                "provider": provider,
+                "provider_name": provider_name,
+                "summary_length": len(llm_result.summary),
+                "entities_count": len(llm_result.entities),
+                "duration_ms": round(duration_ms, 2),
+            }
+        )
     
     return {
         "success": True,

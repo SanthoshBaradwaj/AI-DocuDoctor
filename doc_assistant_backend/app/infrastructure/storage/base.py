@@ -26,4 +26,18 @@ class StorageBackend(Protocol):
             Presigned URL string
         """
         ...
+    
+    def read_bytes(self, key: str) -> bytes:
+        """Read file content as bytes (server-to-server, no presigned URL).
+        
+        Args:
+            key: The storage key/path for the file
+            
+        Returns:
+            File content as bytes
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        ...
 

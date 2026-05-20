@@ -36,6 +36,11 @@ class Document(Base):
     # Traceability
     request_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)  # Request ID from API call
     
+    # Cost guardrails (EPIC 3)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)  # PDF page count
+    ocr_chars: Mapped[int | None] = mapped_column(Integer, nullable=True)  # OCR text character count
+    llm_chars_sent: Mapped[int | None] = mapped_column(Integer, nullable=True)  # Characters sent to LLM
+    
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

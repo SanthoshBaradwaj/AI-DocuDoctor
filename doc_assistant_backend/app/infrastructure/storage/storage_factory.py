@@ -43,6 +43,31 @@ class S3MinIOStorageBackend:
             Presigned URL string
         """
         return presign_get(self.bucket, key, ttl=expires_in)
+    
+    def read_bytes(self, key: str) -> bytes:
+        """Read file content as bytes from S3/MinIO (server-to-server).
+        
+        Args:
+            key: The storage key/path for the file
+            
+        Returns:
+            File content as bytes
+            
+        Raises:
+            FileNotFoundError: If file doesn't exist
+        """
+        from botocore.exceptions import ClientError
+        from app.infrastructure.storage.s3_minio import make_s3
+        
+        s3 = make_s3()
+        try:
+            obj = s3.get_object(Bucket=self.bucket, Key=key)
+            return obj["Body"].read()
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            if error_code == 'NoSuchKey':
+                raise FileNotFoundError(f"File not found: {key}")
+            raise ValueError(f"Storage error: {error_code}")
 
 
 def get_storage_backend() -> StorageBackend:

@@ -66,6 +66,9 @@ class FirestoreDocumentAdapter:
             "domain": doc.domain,
             "doc_type": doc.doc_type,
             "request_id": doc.request_id,
+            "page_count": doc.page_count,
+            "ocr_chars": doc.ocr_chars,
+            "llm_chars_sent": doc.llm_chars_sent,
         }
         
         # Handle dates
@@ -121,6 +124,9 @@ class FirestoreDocumentAdapter:
         doc.domain = data.get("domain")
         doc.doc_type = data.get("doc_type")
         doc.request_id = data.get("request_id")
+        doc.page_count = data.get("page_count")
+        doc.ocr_chars = data.get("ocr_chars")
+        doc.llm_chars_sent = data.get("llm_chars_sent")
         doc.expiry_date = expiry_date
         doc.created_at = created_at
         doc.updated_at = updated_at

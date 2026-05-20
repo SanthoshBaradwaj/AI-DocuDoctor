@@ -20,6 +20,19 @@ class DocOut(BaseModel):
 class DocDetailOut(DocOut):
     body: str
 
+class DocMetaOut(BaseModel):
+    """Metadata response for document cost hints and processing info."""
+    id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    domain: Optional[str] = None
+    doc_type: Optional[str] = None
+    page_count: Optional[int] = None  # PDF page count
+    ocr_chars: Optional[int] = None  # OCR text character count
+    llm_chars_sent: Optional[int] = None  # Characters sent to LLM
+    class Config: from_attributes = True
+
 # Upload schemas
 class UploadInitIn(BaseModel):
     """Request schema for initializing an upload."""
